@@ -1,7 +1,5 @@
 'use client';
 
-import Section from '@/components/ui/Section';
-
 export default function Error({
   reset,
 }: {
@@ -9,7 +7,7 @@ export default function Error({
   reset: () => void;
 }) {
   return (
-    <Section className="text-center">
+    <section className="py-16 px-4 text-center min-h-[60vh] flex flex-col items-center justify-center">
       <h1 className="text-6xl font-bold text-gray-300 mb-4">500</h1>
       <p className="text-xl text-gray-600 mb-8">Something went wrong.</p>
       <button
@@ -18,6 +16,6 @@ export default function Error({
       >
         Try again
       </button>
-    </Section>
+    </section>
   );
 }

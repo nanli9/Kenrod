@@ -5,43 +5,59 @@
     "about": "About",
     "contact": "Contact"
   },
-  "home": {
-    "hero_title": "Kenrod Manufacturing",
-    "hero_subtitle": "Precision Engineering, Exceptional Quality",
-    "scroll_hint": "Scroll to explore the interior",
-    "section_products": "Our Products",
-    "section_about": "About Our Factory",
-    "section_contact": "Get In Touch"
+  "hero": {
+    "title": "Kenrod Manufacturing",
+    "subtitle": "Precision Engineering, Exceptional Quality",
+    "scroll_hint": "Scroll to explore"
+  },
+  "scroll_scene": {
+    "stage1_title": "Precision Crafted",
+    "stage1_text": "Every component engineered to exacting specifications.",
+    "stage2_title": "Built to Last",
+    "stage2_text": "Premium materials and rigorous quality control.",
+    "stage3_title": "Designed for Performance",
+    "stage3_text": "Optimized geometry for maximum efficiency."
   },
   "products": {
     "title": "Our Products",
     "description": "Explore our product lineup",
-    "view_detail": "View Details",
-    "view_3d": "View in 3D",
-    "back": "Back to Products"
+    "buy_shopify": "Buy on Shopify",
+    "buy_amazon": "Buy on Amazon",
+    "product1_name": "Sample Product A",
+    "product1_desc": "A high-precision manufactured component with exceptional quality.",
+    "product2_name": "Sample Product B",
+    "product2_desc": "An advanced engineered part for industrial applications.",
+    "product3_name": "Sample Product C",
+    "product3_desc": "Custom-designed component meeting the highest standards."
   },
   "about": {
     "title": "About Kenrod",
-    "description": "Learn about our factory and capabilities"
+    "description": "With years of experience in precision manufacturing, we deliver components that meet the highest industry standards. Our state-of-the-art facility combines cutting-edge technology with expert craftsmanship.",
+    "capability1_title": "Precision CNC",
+    "capability1_text": "Multi-axis CNC machining with tight tolerances.",
+    "capability2_title": "Quality Assurance",
+    "capability2_text": "ISO-certified processes and rigorous inspection.",
+    "capability3_title": "Custom Solutions",
+    "capability3_text": "Tailored engineering for your specific requirements."
   },
   "contact": {
-    "title": "Contact Us",
-    "description": "Get in touch with our team",
-    "name": "Name",
-    "email": "Email",
-    "message": "Message",
-    "submit": "Send Message",
-    "success": "Message sent successfully!"
+    "title": "Get In Touch",
+    "description": "Ready to discuss your project? Reach out to us directly.",
+    "email_cta": "Email Us",
+    "email_address": "info@kenrod.com",
+    "follow_us": "Follow Us",
+    "address": "Factory Address Placeholder"
   },
   "footer": {
     "copyright": "Kenrod Manufacturing. All rights reserved.",
-    "address": "Factory Address Placeholder"
+    "address": "Factory Address Placeholder",
+    "shop": "Shop",
+    "social": "Social"
   },
   "common": {
     "language": "English",
     "switch_language": "中文",
     "loading": "Loading...",
-    "placeholder_label": "PLACEHOLDER",
     "not_found": "Page not found",
     "go_home": "Back to Home"
   }

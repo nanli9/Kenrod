@@ -1,12 +1,11 @@
 import { useTranslations } from 'next-intl';
 import { Link } from '@/i18n/navigation';
-import Section from '@/components/ui/Section';
 
 export default function NotFound() {
   const t = useTranslations('common');
 
   return (
-    <Section className="text-center">
+    <section className="py-16 px-4 text-center min-h-[60vh] flex flex-col items-center justify-center">
       <h1 className="text-6xl font-bold text-gray-300 mb-4">404</h1>
       <p className="text-xl text-gray-600 mb-8">{t('not_found')}</p>
       <Link
@@ -15,6 +14,6 @@ export default function NotFound() {
       >
         {t('go_home')}
       </Link>
-    </Section>
+    </section>
   );
 }

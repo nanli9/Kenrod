@@ -2,40 +2,54 @@
 
 import { useState } from 'react';
 import { useTranslations } from 'next-intl';
-import { Link, usePathname } from '@/i18n/navigation';
+import { Link } from '@/i18n/navigation';
 import LanguageSwitcher from './LanguageSwitcher';
 
 export default function Header() {
   const t = useTranslations('nav');
-  const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = useState(false);
 
   const navItems = [
-    { href: '/' as const, label: t('home') },
-    { href: '/products' as const, label: t('products') },
-    { href: '/about' as const, label: t('about') },
-    { href: '/contact' as const, label: t('contact') },
+    { href: '#products', label: t('products') },
+    { href: '#about', label: t('about') },
+    { href: '#contact', label: t('contact') },
   ];
 
+  const scrollTo = (e: React.MouseEvent<HTMLAnchorElement>, href: string) => {
+    e.preventDefault();
+    setMobileOpen(false);
+    if (href === '#') {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      return;
+    }
+    const el = document.querySelector(href);
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth' });
+    }
+  };
+
   return (
-    <header className="sticky top-0 z-50 bg-primary text-white shadow-lg">
+    <header className="fixed top-0 z-50 w-full bg-primary/90 backdrop-blur-sm text-white shadow-lg">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex items-center justify-between h-16">
-          <Link href="/" className="text-xl font-bold tracking-wide">
+          <a
+            href="#"
+            onClick={(e) => scrollTo(e, '#')}
+            className="text-xl font-bold tracking-wide"
+          >
             KENROD
-          </Link>
+          </a>
 
           <nav className="hidden md:flex items-center space-x-8">
             {navItems.map((item) => (
-              <Link
+              <a
                 key={item.href}
                 href={item.href}
-                className={`text-sm font-medium transition-colors hover:text-accent ${
-                  pathname === item.href ? 'text-accent' : 'text-gray-300'
-                }`}
+                onClick={(e) => scrollTo(e, item.href)}
+                className="text-sm font-medium text-gray-300 transition-colors hover:text-accent"
               >
                 {item.label}
-              </Link>
+              </a>
             ))}
           </nav>
 
@@ -62,18 +76,14 @@ export default function Header() {
         <nav className="md:hidden border-t border-white/10">
           <div className="px-4 py-3 space-y-2">
             {navItems.map((item) => (
-              <Link
+              <a
                 key={item.href}
                 href={item.href}
-                onClick={() => setMobileOpen(false)}
-                className={`block px-3 py-2 rounded text-sm font-medium transition-colors ${
-                  pathname === item.href
-                    ? 'text-accent bg-white/5'
-                    : 'text-gray-300 hover:text-white hover:bg-white/5'
-                }`}
+                onClick={(e) => scrollTo(e, item.href)}
+                className="block px-3 py-2 rounded text-sm font-medium text-gray-300 hover:text-white hover:bg-white/5 transition-colors"
               >
                 {item.label}
-              </Link>
+              </a>
             ))}
           </div>
         </nav>

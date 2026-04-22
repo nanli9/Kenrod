@@ -5,43 +5,59 @@
     "about": "关于",
     "contact": "联系"
   },
-  "home": {
-    "hero_title": "Kenrod 制造",
-    "hero_subtitle": "精密工程，卓越品质",
-    "scroll_hint": "向下滚动探索内部结构",
-    "section_products": "我们的产品",
-    "section_about": "关于我们的工厂",
-    "section_contact": "联系我们"
+  "hero": {
+    "title": "Kenrod 制造",
+    "subtitle": "精密工程，卓越品质",
+    "scroll_hint": "向下滚动探索"
+  },
+  "scroll_scene": {
+    "stage1_title": "精密制造",
+    "stage1_text": "每个组件都按照严格规格精心设计。",
+    "stage2_title": "经久耐用",
+    "stage2_text": "优质材料与严格的质量控制。",
+    "stage3_title": "性能至上",
+    "stage3_text": "优化几何结构，实现最大效率。"
   },
   "products": {
     "title": "我们的产品",
     "description": "浏览我们的产品系列",
-    "view_detail": "查看详情",
-    "view_3d": "3D 查看",
-    "back": "返回产品列表"
+    "buy_shopify": "在 Shopify 购买",
+    "buy_amazon": "在亚马逊购买",
+    "product1_name": "示例产品 A",
+    "product1_desc": "高精度制造组件，品质卓越。",
+    "product2_name": "示例产品 B",
+    "product2_desc": "用于工业应用的先进工程零件。",
+    "product3_name": "示例产品 C",
+    "product3_desc": "定制设计组件，符合最高标准。"
   },
   "about": {
     "title": "关于 Kenrod",
-    "description": "了解我们的工厂和能力"
+    "description": "凭借多年精密制造经验，我们提供符合最高行业标准的组件。我们先进的工厂将尖端技术与专业工艺相结合。",
+    "capability1_title": "精密数控",
+    "capability1_text": "多轴数控加工，公差严格。",
+    "capability2_title": "质量保证",
+    "capability2_text": "ISO认证流程和严格检验。",
+    "capability3_title": "定制方案",
+    "capability3_text": "针对您的具体需求量身定制工程方案。"
   },
   "contact": {
     "title": "联系我们",
-    "description": "与我们的团队取得联系",
-    "name": "姓名",
-    "email": "邮箱",
-    "message": "留言",
-    "submit": "发送消息",
-    "success": "消息发送成功！"
+    "description": "准备好讨论您的项目了吗？直接联系我们。",
+    "email_cta": "发送邮件",
+    "email_address": "info@kenrod.com",
+    "follow_us": "关注我们",
+    "address": "工厂地址占位符"
   },
   "footer": {
     "copyright": "Kenrod 制造 版权所有",
-    "address": "工厂地址占位符"
+    "address": "工厂地址占位符",
+    "shop": "商店",
+    "social": "社交媒体"
   },
   "common": {
     "language": "中文",
     "switch_language": "English",
     "loading": "加载中...",
-    "placeholder_label": "占位符",
     "not_found": "页面未找到",
     "go_home": "返回首页"
   }
