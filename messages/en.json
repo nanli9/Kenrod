@@ -1,0 +1,48 @@
+{
+  "nav": {
+    "home": "Home",
+    "products": "Products",
+    "about": "About",
+    "contact": "Contact"
+  },
+  "home": {
+    "hero_title": "Kenrod Manufacturing",
+    "hero_subtitle": "Precision Engineering, Exceptional Quality",
+    "scroll_hint": "Scroll to explore the interior",
+    "section_products": "Our Products",
+    "section_about": "About Our Factory",
+    "section_contact": "Get In Touch"
+  },
+  "products": {
+    "title": "Our Products",
+    "description": "Explore our product lineup",
+    "view_detail": "View Details",
+    "view_3d": "View in 3D",
+    "back": "Back to Products"
+  },
+  "about": {
+    "title": "About Kenrod",
+    "description": "Learn about our factory and capabilities"
+  },
+  "contact": {
+    "title": "Contact Us",
+    "description": "Get in touch with our team",
+    "name": "Name",
+    "email": "Email",
+    "message": "Message",
+    "submit": "Send Message",
+    "success": "Message sent successfully!"
+  },
+  "footer": {
+    "copyright": "Kenrod Manufacturing. All rights reserved.",
+    "address": "Factory Address Placeholder"
+  },
+  "common": {
+    "language": "English",
+    "switch_language": "中文",
+    "loading": "Loading...",
+    "placeholder_label": "PLACEHOLDER",
+    "not_found": "Page not found",
+    "go_home": "Back to Home"
+  }
+}

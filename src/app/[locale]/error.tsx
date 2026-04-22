@@ -1,0 +1,23 @@
+'use client';
+
+import Section from '@/components/ui/Section';
+
+export default function Error({
+  reset,
+}: {
+  error: Error & { digest?: string };
+  reset: () => void;
+}) {
+  return (
+    <Section className="text-center">
+      <h1 className="text-6xl font-bold text-gray-300 mb-4">500</h1>
+      <p className="text-xl text-gray-600 mb-8">Something went wrong.</p>
+      <button
+        onClick={reset}
+        className="inline-block bg-accent text-white px-6 py-3 rounded-lg font-medium hover:bg-red-600 transition-colors"
+      >
+        Try again
+      </button>
+    </Section>
+  );
+}

@@ -1,0 +1,48 @@
+{
+  "nav": {
+    "home": "首页",
+    "products": "产品",
+    "about": "关于",
+    "contact": "联系"
+  },
+  "home": {
+    "hero_title": "Kenrod 制造",
+    "hero_subtitle": "精密工程，卓越品质",
+    "scroll_hint": "向下滚动探索内部结构",
+    "section_products": "我们的产品",
+    "section_about": "关于我们的工厂",
+    "section_contact": "联系我们"
+  },
+  "products": {
+    "title": "我们的产品",
+    "description": "浏览我们的产品系列",
+    "view_detail": "查看详情",
+    "view_3d": "3D 查看",
+    "back": "返回产品列表"
+  },
+  "about": {
+    "title": "关于 Kenrod",
+    "description": "了解我们的工厂和能力"
+  },
+  "contact": {
+    "title": "联系我们",
+    "description": "与我们的团队取得联系",
+    "name": "姓名",
+    "email": "邮箱",
+    "message": "留言",
+    "submit": "发送消息",
+    "success": "消息发送成功！"
+  },
+  "footer": {
+    "copyright": "Kenrod 制造 版权所有",
+    "address": "工厂地址占位符"
+  },
+  "common": {
+    "language": "中文",
+    "switch_language": "English",
+    "loading": "加载中...",
+    "placeholder_label": "占位符",
+    "not_found": "页面未找到",
+    "go_home": "返回首页"
+  }
+}
