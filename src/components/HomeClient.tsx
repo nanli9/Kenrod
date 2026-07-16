@@ -31,25 +31,6 @@ interface HomeClientProps {
   };
 }
 
-function HeroSection({ hero }: { hero: HomeClientProps['hero'] }) {
-  return (
-    <section className="relative h-screen flex flex-col items-center justify-center bg-primary text-white overflow-hidden">
-      <div className="absolute inset-0 bg-gradient-to-b from-primary via-primary/90 to-gray-950" />
-      <div className="relative z-10 text-center px-4">
-        <h1 className="text-5xl md:text-7xl font-bold mb-4 tracking-tight">
-          {hero.title}
-        </h1>
-        <p className="text-xl md:text-2xl text-gray-300 mb-12">
-          {hero.subtitle}
-        </p>
-        <p className="text-sm text-gray-500 animate-bounce">
-          &#8595; {hero.scrollHint}
-        </p>
-      </div>
-    </section>
-  );
-}
-
 function ProductsSection({ products }: { products: HomeClientProps['products'] }) {
   return (
     <section id="products" className="py-20 px-4 bg-white">
@@ -73,25 +54,25 @@ function ProductsSection({ products }: { products: HomeClientProps['products'] }
               </div>
               <div className="p-6">
                 <h3 className="text-lg font-semibold mb-2">{item.name}</h3>
-                <p className="text-gray-600 text-sm mb-4">{item.desc}</p>
-                <div className="flex gap-3">
-                  {/* TODO: Replace # with actual store URLs */}
-                  <a
-                    href="#"
-                    className="flex-1 text-center px-4 py-2 bg-accent text-white text-sm rounded hover:bg-red-600 transition-colors"
-                  >
-                    {products.buyShopify}
-                  </a>
-                  <a
-                    href="#"
-                    className="flex-1 text-center px-4 py-2 border border-gray-300 text-gray-700 text-sm rounded hover:bg-gray-50 transition-colors"
-                  >
-                    {products.buyAmazon}
-                  </a>
-                </div>
+                <p className="text-gray-600 text-sm">{item.desc}</p>
               </div>
             </div>
           ))}
+        </div>
+        {/* TODO: Replace # with actual store URLs */}
+        <div className="flex justify-center gap-4 mt-12">
+          <a
+            href="#"
+            className="px-8 py-3 bg-accent text-white text-base font-medium rounded-lg hover:bg-red-600 transition-colors"
+          >
+            {products.buyShopify}
+          </a>
+          <a
+            href="#"
+            className="px-8 py-3 border border-gray-300 text-gray-700 text-base font-medium rounded-lg hover:bg-gray-50 transition-colors"
+          >
+            {products.buyAmazon}
+          </a>
         </div>
       </div>
     </section>
@@ -186,8 +167,7 @@ export default function HomeClient({
 }: HomeClientProps) {
   return (
     <>
-      <HeroSection hero={hero} />
-      <ScrollScene stages={stages} />
+      <ScrollScene hero={hero} stages={stages} />
       <ProductsSection products={products} />
       <AboutSection about={about} />
       <ContactSection contact={contact} />
