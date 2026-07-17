@@ -7,50 +7,22 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        // Warm near-black, like lacquered wood — dark sections (hero, stats, contact, footer)
-        lacquer: {
-          DEFAULT: '#0b0a08',
-          raised: '#141109',
+        // Strict monochrome stage…
+        void: {
+          DEFAULT: '#050505',
+          raised: '#0f0f0f',
         },
-        // Warm gallery paper — light sections where the photography hangs
-        paper: {
-          DEFAULT: '#f5f1e8',
-          deep: '#ebe4d4',
+        smoke: '#f5f5f3',
+        mute: '#8a8a86',
+        // …plus exactly one loud signal.
+        acid: {
+          DEFAULT: '#c6ff00',
+          deep: '#9fce00',
         },
-        // Warm ink for text on paper
-        ink: {
-          DEFAULT: '#1d1912',
-          soft: '#57503f',
-        },
-        // Ivory/bone for text on lacquer
-        ivory: '#f2ede0',
-        bone: {
-          DEFAULT: '#cec4ad',
-          dim: '#877e69',
-        },
-        // Imperial jade — the accent; deep works on paper, bright on lacquer
-        jade: {
-          DEFAULT: '#12896b',
-          bright: '#3bc79d',
-          deep: '#0b5c49',
-        },
-        // Champagne brass — hairlines and micro-details only
-        brass: {
-          DEFAULT: '#c9a96b',
-          dim: '#9a8256',
-        },
-        // Vermilion — reserved exclusively for the 国友 seal chop
-        seal: '#b23b2b',
       },
       fontFamily: {
         sans: ['var(--font-inter)', 'system-ui', '-apple-system', 'sans-serif'],
-        display: [
-          'var(--font-fraunces)',
-          'var(--font-noto-serif-sc)',
-          'Georgia',
-          'Songti SC',
-          'serif',
-        ],
+        display: ['var(--font-anton)', 'Impact', 'Heiti SC', 'PingFang SC', 'sans-serif'],
         mono: ['var(--font-mono)', 'ui-monospace', 'SFMono-Regular', 'monospace'],
       },
       keyframes: {
@@ -68,11 +40,16 @@ const config: Config = {
           '0%, 100%': { opacity: '1' },
           '50%': { opacity: '0.35' },
         },
+        marquee: {
+          from: { transform: 'translateX(0)' },
+          to: { transform: 'translateX(-50%)' },
+        },
       },
       animation: {
         'fade-up': 'fadeUp 0.9s cubic-bezier(0.22, 1, 0.36, 1) both',
         'scroll-line': 'scrollLine 2.2s cubic-bezier(0.65, 0, 0.35, 1) infinite',
         'pulse-soft': 'pulseSoft 2.4s ease-in-out infinite',
+        marquee: 'marquee 22s linear infinite',
       },
     },
   },

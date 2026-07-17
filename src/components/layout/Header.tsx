@@ -3,19 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useTranslations } from 'next-intl';
 import LanguageSwitcher from './LanguageSwitcher';
-
-// The 国友 chop — the only vermilion in the whole system.
-export function SealChop({ className = '' }: { className?: string }) {
-  return (
-    <span
-      aria-hidden
-      className={`inline-flex flex-col items-center justify-center w-[22px] h-[22px] rounded-[5px] bg-seal text-paper font-display font-bold text-[9px] leading-[1.05] select-none ${className}`}
-    >
-      <span>国</span>
-      <span>友</span>
-    </span>
-  );
-}
+import Magnetic from '@/components/motion/Magnetic';
 
 export default function Header() {
   const t = useTranslations('nav');
@@ -49,11 +37,10 @@ export default function Header() {
   };
 
   return (
-    // Stays lacquer-dark over both dark and paper sections — a museum plaque.
     <header
-      className={`fixed top-0 z-50 w-full text-ivory transition-all duration-300 ${
+      className={`fixed top-0 z-50 w-full text-smoke transition-all duration-300 ${
         scrolled || mobileOpen
-          ? 'bg-lacquer/80 backdrop-blur-xl border-b border-brass/15'
+          ? 'bg-void/85 backdrop-blur-xl border-b border-white/10'
           : 'bg-transparent border-b border-transparent'
       }`}
     >
@@ -62,12 +49,10 @@ export default function Header() {
           <a
             href="#"
             onClick={(e) => scrollTo(e, '#')}
-            className="flex items-center gap-3 group"
+            className="flex items-baseline gap-2.5 group"
           >
-            <span className="font-display text-xl font-bold tracking-[0.18em]">
-              KENROD
-            </span>
-            <SealChop className="opacity-90 group-hover:opacity-100 transition-opacity" />
+            <span className="font-display text-xl tracking-[0.14em]">KENROD</span>
+            <span className="font-mono text-[10px] text-acid tracking-widest">国友®</span>
           </a>
 
           <nav className="hidden md:flex items-center gap-9">
@@ -76,9 +61,9 @@ export default function Header() {
                 key={item.href}
                 href={item.href}
                 onClick={(e) => scrollTo(e, item.href)}
-                className="group font-mono text-[11px] uppercase tracking-[0.25em] text-bone hover:text-ivory transition-colors"
+                className="group font-mono text-[11px] uppercase tracking-[0.25em] text-mute hover:text-smoke transition-colors"
               >
-                <span className="text-brass/70 mr-1.5 group-hover:text-brass transition-colors">
+                <span className="text-acid/70 mr-1.5 group-hover:text-acid transition-colors">
                   {item.index}
                 </span>
                 {item.label}
@@ -88,16 +73,18 @@ export default function Header() {
 
           <div className="flex items-center gap-3">
             <LanguageSwitcher />
-            <a
-              href="#contact"
-              onClick={(e) => scrollTo(e, '#contact')}
-              className="hidden sm:inline-flex items-center h-8 px-4 bg-jade text-white text-xs font-medium tracking-wide rounded-full hover:bg-jade-bright hover:text-lacquer transition-colors"
-            >
-              {t('contact')}
-            </a>
+            <Magnetic className="hidden sm:inline-block">
+              <a
+                href="#contact"
+                onClick={(e) => scrollTo(e, '#contact')}
+                className="inline-flex items-center h-8 px-4 bg-acid text-void font-mono text-[11px] font-medium uppercase tracking-[0.15em] rounded-full hover:bg-smoke transition-colors"
+              >
+                {t('contact')}
+              </a>
+            </Magnetic>
             <button
               onClick={() => setMobileOpen(!mobileOpen)}
-              className="md:hidden p-2 text-bone hover:text-ivory"
+              className="md:hidden p-2 text-mute hover:text-smoke"
               aria-label="Toggle menu"
             >
               <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -113,16 +100,16 @@ export default function Header() {
       </div>
 
       {mobileOpen && (
-        <nav className="md:hidden border-t border-brass/15 bg-lacquer/95 backdrop-blur-xl">
+        <nav className="md:hidden border-t border-white/10 bg-void/95 backdrop-blur-xl">
           <div className="px-4 py-4 space-y-1">
             {navItems.map((item) => (
               <a
                 key={item.href}
                 href={item.href}
                 onClick={(e) => scrollTo(e, item.href)}
-                className="flex items-center gap-3 px-3 py-3 font-mono text-xs uppercase tracking-[0.25em] text-bone hover:text-ivory hover:bg-white/5 transition-colors"
+                className="flex items-center gap-3 px-3 py-3 font-mono text-xs uppercase tracking-[0.25em] text-mute hover:text-smoke hover:bg-white/5 transition-colors"
               >
-                <span className="text-brass/70">{item.index}</span>
+                <span className="text-acid/70">{item.index}</span>
                 {item.label}
               </a>
             ))}

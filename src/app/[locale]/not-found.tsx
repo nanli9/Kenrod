@@ -5,15 +5,15 @@ export default function NotFound() {
   const t = useTranslations('common');
 
   return (
-    <section className="py-16 px-4 text-center min-h-[70vh] flex flex-col items-center justify-center bg-lacquer">
-      <p className="font-mono text-xs tracking-[0.35em] text-brass/90 uppercase mb-6">
+    <section className="py-16 px-4 text-center min-h-[70vh] flex flex-col items-center justify-center bg-void">
+      <p className="font-mono text-xs tracking-[0.35em] text-acid uppercase mb-6">
         Error / 404
       </p>
-      <h1 className="font-display text-6xl md:text-7xl font-bold text-ivory mb-4">404</h1>
-      <p className="text-bone mb-10">{t('not_found')}</p>
+      <h1 className="font-display text-8xl md:text-9xl text-smoke uppercase mb-4">404</h1>
+      <p className="text-mute mb-10">{t('not_found')}</p>
       <Link
         href="/"
-        className="inline-flex h-11 items-center px-7 rounded-full bg-jade text-white text-sm font-medium hover:bg-jade-bright hover:text-lacquer transition-colors"
+        className="inline-flex h-11 items-center px-7 rounded-full bg-acid text-void font-mono text-xs uppercase tracking-[0.15em] font-medium hover:bg-smoke transition-colors"
       >
         {t('go_home')}
       </Link>

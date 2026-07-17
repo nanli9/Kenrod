@@ -85,11 +85,11 @@ function sampleTextCoords(text: string) {
     lines = best;
   }
 
-  // The display serif is loaded by next/font; the caller waits on document.fonts
-  // before sampling, so the canvas can rasterise the real editorial face. CJK
-  // glyphs fall through to Noto Serif SC / system Song serifs.
+  // The poster face is loaded by next/font; the caller waits on document.fonts
+  // before sampling, so the canvas can rasterise the real display face. CJK
+  // glyphs fall through to heavy system sans.
   const font = (s: number) =>
-    `700 ${s}px "Fraunces", "Noto Serif SC", "Songti SC", Georgia, serif`;
+    `800 ${s}px "Anton", "Heiti SC", "PingFang SC", "Microsoft YaHei", Impact, sans-serif`;
   let fontSize = 400;
   ctx.font = font(fontSize);
   let maxW = 1;
@@ -203,7 +203,8 @@ type SplatData = {
 // All of it is packed into a float texture and morphed in the vertex shader —
 // at 150k splats a per-frame CPU lerp would not hold 60fps.
 function buildSplatData(text: string, src: ModelSource): SplatData {
-  const { coords, cw, ch } = sampleTextCoords(text);
+  // Poster type is shouted: uppercase the latin, CJK passes through unchanged.
+  const { coords, cw, ch } = sampleTextCoords(text.toUpperCase());
   const textCount = Math.max(1, coords.length / 2);
   const count = src.count;
 
@@ -227,13 +228,11 @@ function buildSplatData(text: string, src: ModelSource): SplatData {
     if (y > maxY) maxY = y;
   }
 
-  // Ivory/bone particle palette with rare jade and brass glints — the word
-  // reads as carved bone on lacquer, not confetti.
-  const cIvory = new THREE.Color('#f2ede0');
-  const cBone = new THREE.Color('#cec4ad');
-  const cJade = new THREE.Color('#3bc79d');
-  const cBrass = new THREE.Color('#c9a96b');
-  const cJadeDeep = new THREE.Color('#0b5c49');
+  // Strict monochrome particles with a rare acid strike — poster ink, not confetti.
+  const cSmoke = new THREE.Color('#f5f5f3');
+  const cGray = new THREE.Color('#8a8a86');
+  const cAcid = new THREE.Color('#c6ff00');
+  const cCharcoal = new THREE.Color('#2a2a28');
   const tmp = new THREE.Color();
 
   const texH = Math.ceil((count * TEXELS_PER_SPLAT) / TEX_W);
@@ -280,12 +279,12 @@ function buildSplatData(text: string, src: ModelSource): SplatData {
     delayMorph[k] = Math.random() * 0.08;
     delayBlast[k] = Math.random() * 0.12;
 
-    // text colour: ivory body, bone shadow, rare jade/brass glints
+    // text colour: smoke body, gray shadow, rare acid strikes
     const rc = Math.random();
-    const tc = rc < 0.8 ? cIvory : rc < 0.92 ? cBone : rc < 0.97 ? cJade : cBrass;
+    const tc = rc < 0.82 ? cSmoke : rc < 0.94 ? cGray : cAcid;
 
-    // model colour: photoreal from the capture (graded warm in the shader),
-    // else a jade->ivory height gradient for the bare CAD cloud
+    // model colour: photoreal from the capture (graded high-contrast B&W in the
+    // shader), else a charcoal->smoke height gradient for the bare CAD cloud
     let mr: number;
     let mg: number;
     let mb: number;
@@ -294,8 +293,8 @@ function buildSplatData(text: string, src: ModelSource): SplatData {
       mg = src.color[i3 + 1];
       mb = src.color[i3 + 2];
     } else if (maxY > minY) {
-      tmp.copy(cJadeDeep).lerp(cIvory, (modelHome[i3 + 1] - minY) / (maxY - minY));
-      if (Math.random() < 0.05) tmp.copy(cBrass);
+      tmp.copy(cCharcoal).lerp(cSmoke, (modelHome[i3 + 1] - minY) / (maxY - minY));
+      if (Math.random() < 0.04) tmp.copy(cAcid);
       mr = tmp.r;
       mg = tmp.g;
       mb = tmp.b;
@@ -381,7 +380,10 @@ uniform vec2 uFocal;
 uniform vec2 uViewport;
 uniform float uTextDot;
 uniform float uTextAlpha;
-uniform float uGrade; // 1 => photoreal capture: pull its colours toward the site's warm palette
+uniform float uGrade; // 1 => photoreal capture: grade it into the site's monochrome
+uniform vec2 uMouse;  // cursor on the z=0 plane, world units
+uniform float uTime;
+uniform float uRepel;
 
 out vec4 vColor;
 out vec2 vQuad;
@@ -396,12 +398,12 @@ float easeOutCubic(float t) { float u = 1.0 - t; return 1.0 - u * u * u; }
 float easeInCubic(float t) { return t * t * t; }
 float smoothstep01(float t) { return t * t * (3.0 - 2.0 * t); }
 
-// Luminance-preserving warm grade: desaturate, shift toward candlelit silver, lift.
-vec3 gradeWarm(vec3 c) {
+// Near-total desaturation + contrast punch: silver-gelatin print, not sepia.
+vec3 gradeMono(vec3 c) {
   float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
-  vec3 d = mix(c, vec3(l), 0.32);
-  d *= vec3(1.07, 1.0, 0.88);
-  return clamp(d * 1.05 + 0.02, 0.0, 1.0);
+  vec3 d = mix(c, vec3(l), 0.88);
+  d = (d - 0.5) * 1.22 + 0.54;
+  return clamp(d, 0.0, 1.0);
 }
 
 mat3 quatToMat(vec4 q) {
@@ -432,11 +434,22 @@ void main() {
   vec3 formed = mix(base, t2.xyz, m);
   vec3 center = mix(formed, t3.xyz, b);
 
+  // Cursor repulsion + idle simmer, text phase only (the photoreal model must
+  // not smear). GPU-only offsets are small enough not to upset the CPU depth
+  // sort. This is the animejs.com "poke the letters" interaction — a gentle
+  // bulge, not a crater (the word is only ~1.5 units tall).
+  float live = (1.0 - m) * (1.0 - b) * a;
+  vec2 dm = center.xy - uMouse;
+  float dl = length(dm);
+  center.xy += (dm / max(dl, 0.2)) * exp(-dl * dl * 3.0) * uRepel * live;
+  center.x += sin(uTime * 1.1 + iIndex * 0.37) * 0.014 * live;
+  center.y += cos(uTime * 1.4 + iIndex * 0.53) * 0.014 * live;
+
   // In-flight splats stay faint dust and brighten as they seat into the word;
   // the explosion dissolves to black instead of ending on a noise field.
   float dust = mix(0.05, 1.0, a);
   float fade = 1.0 - 0.9 * b;
-  vec3 modelCol = mix(t5.rgb, gradeWarm(t5.rgb), uGrade);
+  vec3 modelCol = mix(t5.rgb, gradeMono(t5.rgb), uGrade);
   vColor = vec4(
     mix(t4.rgb, modelCol, m),
     mix(uTextAlpha * dust, t3.w, m) * fade
@@ -589,6 +602,18 @@ function SplatCloud({
       window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   }, []);
 
+  // r3f's pointer defaults to (0,0) — screen centre — which would dent the
+  // middle of the word before the user ever touches the mouse. Only hand the
+  // cursor to the shader once it has actually moved.
+  const pointerLive = useRef(false);
+  useEffect(() => {
+    const arm = () => {
+      pointerLive.current = true;
+    };
+    window.addEventListener('pointermove', arm, { once: true, passive: true });
+    return () => window.removeEventListener('pointermove', arm);
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     const limit =
@@ -602,8 +627,7 @@ function SplatCloud({
       // DOM) so the first build doesn't sample a fallback serif.
       try {
         await Promise.allSettled([
-          document.fonts.load('700 200px "Fraunces"'),
-          document.fonts.load('700 200px "Noto Serif SC"'),
+          document.fonts.load('400 200px "Anton"'),
           document.fonts.ready,
         ]);
       } catch {
@@ -675,6 +699,9 @@ function SplatCloud({
         uTextDot: { value: 0.0065 },
         uTextAlpha: { value: 0.68 },
         uGrade: { value: src.photoreal ? 1 : 0 },
+        uMouse: { value: new THREE.Vector2(99, 99) },
+        uTime: { value: 0 },
+        uRepel: { value: 0.38 },
       },
       vertexShader: SPLAT_VERT,
       fragmentShader: SPLAT_FRAG,
@@ -716,7 +743,7 @@ function SplatCloud({
     };
   }, [geometry, material, data]);
 
-  useFrame((_state, delta) => {
+  useFrame((state, delta) => {
     const grp = groupRef.current;
     const mesh = meshRef.current;
     if (!grp || !mesh || !data || !material) return;
@@ -737,6 +764,19 @@ function SplatCloud({
     const fy = size.height / (2 * Math.tan(((cam.fov * Math.PI) / 180) / 2));
     material.uniforms.uFocal.value.set(fy, fy);
     material.uniforms.uViewport.value.set(size.width, size.height);
+
+    // Cursor on the z=0 plane (where the word sits) + clock for the simmer.
+    // Reduced motion (or an untouched pointer) parks the cursor far away.
+    material.uniforms.uTime.value += Math.min(delta, 0.05);
+    if (reducedMotion.current || !pointerLive.current) {
+      material.uniforms.uMouse.value.set(99, 99);
+    } else {
+      const halfH = Math.tan((cam.fov * Math.PI) / 360) * cam.position.z;
+      material.uniforms.uMouse.value.set(
+        state.pointer.x * halfH * (size.width / size.height),
+        state.pointer.y * halfH
+      );
+    }
 
     // Scroll-driven 3D rotation (deterministic + reversible): no rotation while
     // the word is readable, a gentle turn through the morph, then a sweep as the
@@ -824,7 +864,7 @@ function BackgroundParticles({ progress }: { progress: number }) {
       <bufferGeometry>
         <bufferAttribute attach="attributes-position" args={[positions, 3]} />
       </bufferGeometry>
-      <pointsMaterial size={0.02} color="#bfb49a" transparent opacity={0.07} sizeAttenuation />
+      <pointsMaterial size={0.02} color="#8a8a86" transparent opacity={0.07} sizeAttenuation />
     </points>
   );
 }
@@ -893,11 +933,11 @@ export default function ScrollScene({
   );
 
   if (!mounted) {
-    return <div className="h-[500vh] bg-lacquer" />;
+    return <div className="h-[500vh] bg-void" />;
   }
 
   return (
-    <div ref={containerRef} className="relative h-[500vh] bg-lacquer">
+    <div ref={containerRef} className="relative h-[500vh] bg-void">
       {/* Sticky canvas */}
       <div className="sticky top-0 h-screen w-full overflow-hidden">
         <Canvas camera={{ position: [0, 0, 10], fov: 50 }}>
@@ -909,11 +949,11 @@ export default function ScrollScene({
           className="pointer-events-none absolute inset-0"
           style={{
             background:
-              'radial-gradient(120% 90% at 50% 42%, transparent 42%, rgba(8, 7, 5, 0.78) 100%)',
+              'radial-gradient(120% 90% at 50% 42%, transparent 42%, rgba(3, 3, 3, 0.8) 100%)',
           }}
         />
-        <div className="pointer-events-none absolute inset-x-0 top-0 h-28 bg-gradient-to-b from-lacquer/90 to-transparent" />
-        <div className="pointer-events-none absolute inset-x-0 bottom-0 h-32 bg-gradient-to-t from-lacquer to-transparent" />
+        <div className="pointer-events-none absolute inset-x-0 top-0 h-28 bg-gradient-to-b from-void/90 to-transparent" />
+        <div className="pointer-events-none absolute inset-x-0 bottom-0 h-32 bg-gradient-to-t from-void to-transparent" />
 
         {/* Accessible heading — the particle word is not readable to screen readers */}
         <h1 className="sr-only">{hero.title}</h1>
@@ -923,9 +963,9 @@ export default function ScrollScene({
           <div className="absolute inset-0 grid place-items-center">
             <div className="flex flex-col items-center gap-5">
               <div className="h-px w-32 bg-white/10 overflow-hidden">
-                <div className="h-full w-full bg-jade-bright/80 animate-pulse-soft" />
+                <div className="h-full w-full bg-acid/90 animate-pulse-soft" />
               </div>
-              <p className="font-mono text-[11px] tracking-[0.35em] uppercase text-bone-dim animate-pulse-soft">
+              <p className="font-mono text-[11px] tracking-[0.35em] uppercase text-mute animate-pulse-soft">
                 {hero.loading}
               </p>
             </div>
@@ -938,10 +978,10 @@ export default function ScrollScene({
           style={{ opacity: heroOpacity }}
         >
           <div className={ready ? 'animate-fade-up [animation-delay:600ms]' : 'opacity-0'}>
-            <p className="font-mono text-[11px] md:text-xs tracking-[0.4em] uppercase text-brass/90 text-center mb-4">
+            <p className="font-mono text-[11px] md:text-xs tracking-[0.4em] uppercase text-acid text-center mb-4">
               {hero.eyebrow}
             </p>
-            <p className="font-display text-xl md:text-3xl text-ivory/90 text-center px-6">
+            <p className="font-mono text-xs md:text-sm uppercase tracking-[0.25em] text-smoke/80 text-center px-6">
               {hero.subtitle}
             </p>
           </div>
@@ -950,10 +990,10 @@ export default function ScrollScene({
               ready ? 'animate-fade-up [animation-delay:1200ms]' : 'opacity-0'
             }`}
           >
-            <span className="font-mono text-[10px] tracking-[0.35em] uppercase text-bone-dim">
+            <span className="font-mono text-[10px] tracking-[0.35em] uppercase text-mute">
               {hero.scrollHint}
             </span>
-            <span className="block h-10 w-px bg-gradient-to-b from-brass/70 to-transparent animate-scroll-line" />
+            <span className="block h-10 w-px bg-gradient-to-b from-acid/80 to-transparent animate-scroll-line" />
           </div>
         </div>
 
@@ -975,13 +1015,13 @@ export default function ScrollScene({
                         : 'opacity-0 translate-y-8'
                   }`}
                 >
-                  <p className="font-mono text-xs tracking-[0.35em] text-jade-bright mb-5">
+                  <p className="font-mono text-xs tracking-[0.35em] text-acid mb-5">
                     {String(i + 1).padStart(2, '0')} / {String(stages.length).padStart(2, '0')}
                   </p>
-                  <h3 className="font-display text-3xl md:text-5xl font-semibold text-ivory tracking-tight mb-5">
+                  <h3 className="font-display text-4xl md:text-6xl uppercase text-smoke tracking-wide mb-5">
                     {stage.title}
                   </h3>
-                  <p className="text-bone text-base md:text-lg leading-relaxed border-l border-brass/30 pl-5">
+                  <p className="text-mute text-base md:text-lg leading-relaxed border-l border-white/15 pl-5">
                     {stage.text}
                   </p>
                 </div>
@@ -992,16 +1032,16 @@ export default function ScrollScene({
 
         {/* Scroll progress rail */}
         <div className="absolute right-6 lg:right-8 top-1/2 -translate-y-1/2 hidden md:flex flex-col items-center gap-3">
-          <span className="font-mono text-[10px] text-bone-dim tabular-nums">
+          <span className="font-mono text-[10px] text-mute tabular-nums">
             {String(Math.round(progress * 100)).padStart(3, '0')}
           </span>
           <div className="relative h-44 w-px bg-white/10 overflow-hidden">
             <div
-              className="absolute top-0 left-0 w-full bg-brass shadow-[0_0_12px_rgba(201,169,107,0.9)]"
+              className="absolute top-0 left-0 w-full bg-acid shadow-[0_0_12px_rgba(198,255,0,0.9)]"
               style={{ height: `${progress * 100}%` }}
             />
           </div>
-          <span className="font-mono text-[10px] text-bone-dim tabular-nums">100</span>
+          <span className="font-mono text-[10px] text-mute tabular-nums">100</span>
         </div>
       </div>
     </div>

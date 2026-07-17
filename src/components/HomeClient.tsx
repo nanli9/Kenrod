@@ -3,27 +3,11 @@
 import Image from 'next/image';
 import { useTranslations } from 'next-intl';
 import ScrollScene from '@/components/three/ScrollScene';
-
-function Eyebrow({
-  index,
-  tone = 'paper',
-  children,
-}: {
-  index: string;
-  tone?: 'paper' | 'lacquer';
-  children: React.ReactNode;
-}) {
-  const text = tone === 'paper' ? 'text-jade-deep' : 'text-brass/90';
-  const rule = tone === 'paper' ? 'bg-jade/60' : 'bg-brass/50';
-  return (
-    <p
-      className={`flex items-center gap-3 font-mono text-[11px] uppercase tracking-[0.35em] mb-5 ${text}`}
-    >
-      <span aria-hidden className={`h-px w-8 ${rule}`} />
-      {index} / {children}
-    </p>
-  );
-}
+import Marquee from '@/components/motion/Marquee';
+import KineticTitle from '@/components/motion/KineticTitle';
+import Magnetic from '@/components/motion/Magnetic';
+import CountUp from '@/components/motion/CountUp';
+import { useInView } from '@/components/motion/useInView';
 
 // 1: blue table in marble room · 5: closed-top dining mode · 3: walnut, top-down
 // (2/4/6 are alternates; 2 and 4 carry large baked-in poster text)
@@ -32,6 +16,84 @@ const PRODUCT_IMAGES = [
   '/images/products/product-5.jpg',
   '/images/products/product-3.jpg',
 ];
+
+function AcidMarquee() {
+  return (
+    <div className="relative z-10 bg-acid text-void border-y border-void">
+      <Marquee className="py-3 md:py-4">
+        {Array.from({ length: 4 }).map((_, i) => (
+          <span
+            key={i}
+            className="font-display uppercase text-2xl md:text-4xl tracking-wide mx-6 flex items-center gap-12"
+          >
+            KENROD <span className="text-lg md:text-2xl">●</span> 国友{' '}
+            <span className="text-lg md:text-2xl">●</span> PRECISION ENGINEERING{' '}
+            <span className="text-lg md:text-2xl">●</span> EXCEPTIONAL QUALITY{' '}
+            <span className="text-lg md:text-2xl">●</span>
+          </span>
+        ))}
+      </Marquee>
+    </div>
+  );
+}
+
+function ProductCard({
+  name,
+  desc,
+  image,
+  index,
+}: {
+  name: string;
+  desc: string;
+  image: string;
+  index: number;
+}) {
+  const { ref, inView } = useInView<HTMLElement>(0.2);
+
+  return (
+    <figure ref={ref} className={`group relative ${inView ? 'is-inview' : ''}`}>
+      <span
+        aria-hidden
+        className="font-display text-outline-dark absolute -top-10 -left-2 text-8xl md:text-9xl leading-none z-0"
+      >
+        {String(index + 1).padStart(2, '0')}
+      </span>
+      <div
+        className="reveal-img relative z-10 aspect-[3/4] overflow-hidden"
+        style={{ transitionDelay: `${index * 120}ms` }}
+      >
+        <Image
+          src={image}
+          alt={name}
+          fill
+          sizes="(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 33vw"
+          className="object-cover grayscale group-hover:grayscale-0 group-hover:scale-[1.04] transition-all duration-700"
+        />
+      </div>
+      <figcaption className="relative z-10 mt-5">
+        <div className="flex items-baseline justify-between mb-2">
+          <span className="font-mono text-[10px] tracking-[0.3em] text-void/50 uppercase">
+            UNIT {String(index + 1).padStart(2, '0')}
+          </span>
+          <span
+            aria-hidden
+            className="font-mono text-sm text-void/40 group-hover:text-acid-deep group-hover:translate-x-0.5 transition-all"
+          >
+            ↗
+          </span>
+        </div>
+        <h3 className="font-display uppercase text-2xl md:text-3xl tracking-wide mb-2">
+          {name}
+        </h3>
+        <p className="text-sm leading-relaxed text-void/60 max-w-xs">{desc}</p>
+        <span
+          aria-hidden
+          className="block h-[3px] w-full bg-void mt-5 scale-x-0 group-hover:scale-x-100 origin-left transition-transform duration-500"
+        />
+      </figcaption>
+    </figure>
+  );
+}
 
 function ProductsSection() {
   const t = useTranslations();
@@ -42,76 +104,56 @@ function ProductsSection() {
   }));
 
   return (
-    <section
-      id="products"
-      className="relative scroll-mt-16 py-24 md:py-32 px-4 sm:px-6 lg:px-8 bg-paper text-ink"
-    >
-      <div className="max-w-7xl mx-auto">
-        <div className="flex flex-col md:flex-row md:items-end md:justify-between gap-6 mb-16 md:mb-24">
-          <div>
-            <Eyebrow index="01">{t('nav.products')}</Eyebrow>
-            <h2 className="font-display text-4xl md:text-6xl font-semibold tracking-tight">
-              {t('products.title')}
-            </h2>
+    <>
+      <AcidMarquee />
+      <section
+        id="products"
+        className="relative scroll-mt-16 py-24 md:py-32 px-4 sm:px-6 lg:px-8 bg-smoke text-void"
+      >
+        <div className="max-w-7xl mx-auto">
+          <div className="flex flex-col md:flex-row md:items-end md:justify-between gap-6 mb-16 md:mb-24">
+            <div>
+              <p className="font-mono text-[11px] uppercase tracking-[0.35em] text-void/50 mb-4">
+                01 / {t('nav.products')}
+              </p>
+              <KineticTitle
+                text={t('products.title')}
+                className="font-display uppercase leading-[0.95] tracking-wide text-5xl md:text-8xl"
+              />
+            </div>
+            <p className="max-w-sm font-mono text-xs uppercase tracking-wider leading-relaxed text-void/60 md:text-right">
+              {t('products.description')}
+            </p>
           </div>
-          <p className="max-w-sm text-sm leading-relaxed text-ink-soft md:text-right">
-            {t('products.description')}
-          </p>
-        </div>
 
-        {/* Gallery hang: staggered frames with placard captions */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-8 gap-y-16">
-          {items.map((item, i) => (
-            <figure key={i} className={`group ${i === 1 ? 'lg:mt-20' : ''}`}>
-              <div className="relative aspect-[3/4] overflow-hidden rounded-xl border border-ink/10 shadow-[0_24px_60px_-28px_rgba(29,25,18,0.4)]">
-                <Image
-                  src={item.image}
-                  alt={item.name}
-                  fill
-                  sizes="(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 33vw"
-                  className="object-cover transition-transform duration-700 group-hover:scale-[1.04]"
-                />
-              </div>
-              <figcaption className="mt-6">
-                <div className="flex items-baseline justify-between mb-2">
-                  <span className="font-mono text-[10px] tracking-[0.3em] text-ink-soft/70 uppercase">
-                    UNIT {String(i + 1).padStart(2, '0')}
-                  </span>
-                  <span
-                    aria-hidden
-                    className="font-mono text-xs text-ink-soft/50 group-hover:text-jade-deep group-hover:translate-x-0.5 transition-all"
-                  >
-                    ↗
-                  </span>
-                </div>
-                <h3 className="font-display text-2xl font-semibold mb-2">{item.name}</h3>
-                <p className="text-sm leading-relaxed text-ink-soft max-w-xs">{item.desc}</p>
-                <span
-                  aria-hidden
-                  className="block h-px w-full bg-brass mt-5 scale-x-0 group-hover:scale-x-100 origin-left transition-transform duration-500"
-                />
-              </figcaption>
-            </figure>
-          ))}
-        </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-8 gap-y-20">
+            {items.map((item, i) => (
+              <ProductCard key={i} {...item} index={i} />
+            ))}
+          </div>
 
-        {/* TODO: Replace # with actual store URLs */}
-        <div className="flex flex-wrap justify-center gap-4 mt-20">
-          <a
-            href="#"
-            className="inline-flex h-12 items-center px-8 rounded-full bg-ink text-paper text-sm font-medium tracking-wide hover:bg-jade-deep transition-colors"
-          >
-            {t('products.buy_shopify')}
-          </a>
-          <a
-            href="#"
-            className="inline-flex h-12 items-center px-8 rounded-full border border-ink/20 text-ink text-sm font-medium tracking-wide hover:border-jade hover:text-jade-deep transition-colors"
-          >
-            {t('products.buy_amazon')}
-          </a>
+          {/* TODO: Replace # with actual store URLs */}
+          <div className="flex flex-wrap justify-center gap-5 mt-20">
+            <Magnetic>
+              <a
+                href="#"
+                className="inline-flex h-12 items-center px-8 rounded-full bg-void text-smoke font-mono text-xs uppercase tracking-[0.15em] hover:bg-acid-deep hover:text-void transition-colors"
+              >
+                {t('products.buy_shopify')}
+              </a>
+            </Magnetic>
+            <Magnetic>
+              <a
+                href="#"
+                className="inline-flex h-12 items-center px-8 rounded-full border border-void/25 text-void font-mono text-xs uppercase tracking-[0.15em] hover:border-void hover:bg-void hover:text-smoke transition-colors"
+              >
+                {t('products.buy_amazon')}
+              </a>
+            </Magnetic>
+          </div>
         </div>
-      </div>
-    </section>
+      </section>
+    </>
   );
 }
 
@@ -130,51 +172,53 @@ function AboutSection() {
   return (
     <section
       id="about"
-      className="relative scroll-mt-16 py-24 md:py-32 px-4 sm:px-6 lg:px-8 bg-paper-deep text-ink border-t border-ink/10"
+      className="relative scroll-mt-16 py-24 md:py-32 px-4 sm:px-6 lg:px-8 bg-void text-smoke border-t border-white/10"
     >
       <div className="max-w-7xl mx-auto">
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-12 lg:gap-20">
           <div className="lg:sticky lg:top-28 self-start">
-            <Eyebrow index="02">{t('nav.about')}</Eyebrow>
-            <h2 className="font-display text-4xl md:text-6xl font-semibold tracking-tight mb-6">
-              {t('about.title')}
-            </h2>
-            <p className="text-base leading-relaxed text-ink-soft max-w-lg">
+            <p className="font-mono text-[11px] uppercase tracking-[0.35em] text-acid mb-4">
+              02 / {t('nav.about')}
+            </p>
+            <KineticTitle
+              text={t('about.title')}
+              className="font-display uppercase leading-[0.95] tracking-wide text-5xl md:text-7xl mb-6"
+            />
+            <p className="text-base leading-relaxed text-mute max-w-lg">
               {t('about.description')}
             </p>
           </div>
 
-          <div className="divide-y divide-ink/10 border-y border-ink/10">
+          <div className="divide-y divide-white/10 border-y border-white/10">
             {capabilities.map((cap, i) => (
               <div key={i} className="group flex gap-6 py-8">
-                <span className="font-mono text-xs text-jade-deep pt-1.5">
+                <span className="font-mono text-xs text-acid pt-1.5">
                   {String(i + 1).padStart(2, '0')}
                 </span>
                 <div>
-                  <h3 className="font-display text-xl md:text-2xl font-semibold mb-2 group-hover:text-jade-deep transition-colors">
+                  <h3 className="font-display uppercase text-xl md:text-2xl tracking-wide mb-2 group-hover:text-acid transition-colors">
                     {cap.title}
                   </h3>
-                  <p className="text-sm leading-relaxed text-ink-soft">{cap.text}</p>
+                  <p className="text-sm leading-relaxed text-mute">{cap.text}</p>
                 </div>
               </div>
             ))}
           </div>
         </div>
 
-        {/* Lacquer vitrine — the dark stats case set into the gallery wall */}
-        <div className="mt-20 md:mt-24 rounded-2xl border border-brass/25 overflow-hidden">
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-px bg-brass/20">
-            {stats.map((stat, i) => (
-              <div key={i} className="bg-lacquer p-7 md:p-9">
-                <p className="font-display text-3xl md:text-4xl font-semibold text-ivory mb-2">
-                  {stat.value}
-                </p>
-                <p className="font-mono text-[10px] uppercase tracking-[0.25em] text-bone-dim leading-relaxed">
-                  {stat.label}
-                </p>
-              </div>
-            ))}
-          </div>
+        {/* Counter wall */}
+        <div className="mt-20 md:mt-24 grid grid-cols-2 lg:grid-cols-4 gap-px bg-white/10 border border-white/10">
+          {stats.map((stat, i) => (
+            <div key={i} className="bg-void p-7 md:p-9">
+              <CountUp
+                value={stat.value}
+                className="font-display text-5xl md:text-7xl text-acid leading-none block mb-3"
+              />
+              <p className="font-mono text-[10px] uppercase tracking-[0.25em] text-mute leading-relaxed">
+                {stat.label}
+              </p>
+            </div>
+          ))}
         </div>
       </div>
     </section>
@@ -207,31 +251,31 @@ function ContactSection() {
   return (
     <section
       id="contact"
-      className="relative scroll-mt-16 py-24 md:py-36 px-4 sm:px-6 lg:px-8 bg-lacquer overflow-hidden"
+      className="relative scroll-mt-16 py-24 md:py-36 px-4 sm:px-6 lg:px-8 bg-void text-smoke border-t border-white/10 overflow-hidden"
     >
-      <div aria-hidden className="absolute inset-0 brass-grid grid-fade" />
-      <div className="relative max-w-2xl mx-auto text-center">
-        <p className="flex items-center justify-center gap-3 font-mono text-[11px] uppercase tracking-[0.35em] text-brass/90 mb-5">
-          <span aria-hidden className="h-px w-8 bg-brass/50" />
+      <div className="relative max-w-3xl mx-auto text-center">
+        <p className="font-mono text-[11px] uppercase tracking-[0.35em] text-acid mb-5">
           03 / {tNav('contact')}
-          <span aria-hidden className="h-px w-8 bg-brass/50" />
         </p>
-        <h2 className="font-display text-4xl md:text-6xl font-semibold tracking-tight text-ivory mb-5">
-          {t('title')}
-        </h2>
-        <p className="text-bone mb-10">{t('description')}</p>
+        <KineticTitle
+          text={t('title')}
+          className="font-display uppercase leading-[0.95] tracking-wide text-5xl md:text-8xl mb-6 flex flex-wrap justify-center"
+        />
+        <p className="text-mute mb-12">{t('description')}</p>
 
         {/* Email CTA */}
-        <div className="flex flex-col items-center gap-4 mb-14">
+        <div className="flex flex-col items-center gap-5 mb-16">
+          <Magnetic strength={0.45}>
+            <a
+              href={`mailto:${t('email_address')}`}
+              className="inline-flex h-14 items-center px-10 rounded-full bg-acid text-void font-mono text-sm font-medium uppercase tracking-[0.15em] hover:bg-smoke transition-colors"
+            >
+              {t('email_cta')}
+            </a>
+          </Magnetic>
           <a
             href={`mailto:${t('email_address')}`}
-            className="inline-flex h-12 items-center px-8 rounded-full bg-jade text-white text-sm font-medium tracking-wide hover:bg-jade-bright hover:text-lacquer transition-colors"
-          >
-            {t('email_cta')}
-          </a>
-          <a
-            href={`mailto:${t('email_address')}`}
-            className="font-mono text-xs text-bone-dim hover:text-jade-bright transition-colors tracking-wider"
+            className="font-mono text-xs text-mute hover:text-acid transition-colors tracking-wider"
           >
             {t('email_address')}
           </a>
@@ -239,27 +283,28 @@ function ContactSection() {
 
         {/* Social Media Links */}
         <div className="mb-10">
-          <p className="font-mono text-[10px] uppercase tracking-[0.3em] text-bone-dim mb-5">
+          <p className="font-mono text-[10px] uppercase tracking-[0.3em] text-mute mb-5">
             {t('follow_us')}
           </p>
           <div className="flex justify-center gap-3">
             {/* TODO: Replace # with actual social media URLs */}
             {SOCIALS.map((s) => (
-              <a
-                key={s.label}
-                href="#"
-                aria-label={s.label}
-                className="grid place-items-center w-11 h-11 rounded-lg border border-bone/20 text-bone hover:text-jade-bright hover:border-jade/50 transition-colors"
-              >
-                <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
-                  <path d={s.path} />
-                </svg>
-              </a>
+              <Magnetic key={s.label} strength={0.5}>
+                <a
+                  href="#"
+                  aria-label={s.label}
+                  className="grid place-items-center w-11 h-11 rounded-full border border-white/15 text-mute hover:text-acid hover:border-acid/60 transition-colors"
+                >
+                  <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
+                    <path d={s.path} />
+                  </svg>
+                </a>
+              </Magnetic>
             ))}
           </div>
         </div>
 
-        <p className="font-mono text-xs text-bone-dim tracking-wider">{t('address')}</p>
+        <p className="font-mono text-xs text-mute tracking-wider">{t('address')}</p>
       </div>
     </section>
   );
