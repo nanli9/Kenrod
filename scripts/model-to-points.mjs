@@ -1,19 +1,26 @@
-// Sample a product model's surface into a compact point cloud for the web hero.
+// Turn a product model into the compact splat cloud the web hero renders.
 //
 // Supports two inputs:
-//   * Binary STL  (CAD/mesh)      -> area-weighted surface sampling, no colour
-//   * 3DGS  .ply  (gaussian splat)-> gaussian centres + per-point photoreal colour
+//   * 3DGS  .ply  (gaussian splat) -> real gaussians: centre, anisotropic scale,
+//                                     rotation, opacity and photoreal DC colour
+//   * Binary STL  (CAD/mesh)       -> area-weighted surface sampling, positions only
 //
-// Outputs:
-//   <out>.bin           Float32 xyz * N   (always)
-//   <out coloured>.bin  Float32 rgb * N   (PLY only, written next to <out> as
-//                       "<name>-colors.bin"; the hero loads it if present)
+// Outputs (to <out>'s directory):
+//   PLY -> "<name>-splats.bin"  32 bytes/splat, the standard .splat layout:
+//            pos   3 x float32  (12B)
+//            scale 3 x float32  (12B)
+//            color 4 x uint8    ( 4B)  rgb + opacity
+//            quat  4 x uint8    ( 4B)  wxyz, encoded (v*128 + 128)
+//   STL -> "<name>.bin"         Float32 xyz (no gaussian params exist for a mesh;
+//                               the hero synthesises small isotropic gaussians)
 //
 // Usage:
-//   node scripts/model-to-points.mjs <input.stl|.ply> <output.bin> [count] [--up z|y|-y|...] [--yaw deg] [--min-alpha a]
-//   e.g. node scripts/model-to-points.mjs capture.ply public/models/mahjong-points.bin 20000 --up y
+//   node scripts/model-to-points.mjs <input.ply|.stl> <output.bin> [count] [--up z|y|-y|...] [--yaw deg] [--min-alpha a]
+//   e.g. node scripts/model-to-points.mjs capture.ply public/models/mahjong-points.bin 150000 --up z
 //
-// Re-run when the complete model / a new capture arrives — no app code changes.
+// NOTE: --up defaults differ per format but are NOT reliable — splat world frames
+// are arbitrary per capture tool. Always eyeball the result and re-run with the
+// right --up/--yaw. (The Kitty test capture is z-up despite being a splat.)
 
 import fs from 'fs';
 import path from 'path';
@@ -32,35 +39,105 @@ const yaw = ((parseFloat(flags.yaw || '0') || 0) * Math.PI) / 180;
 const minAlpha = flags['min-alpha'] !== undefined ? parseFloat(flags['min-alpha']) : 0.25;
 
 if (!inPath || !outPath) {
-  console.error('Usage: node scripts/model-to-points.mjs <input.stl|.ply> <output.bin> [count] [--up axis] [--yaw deg] [--min-alpha a]');
+  console.error('Usage: node scripts/model-to-points.mjs <input.ply|.stl> <output.bin> [count] [--up axis] [--yaw deg] [--min-alpha a]');
   process.exit(1);
 }
 
 const isPly = inPath.toLowerCase().endsWith('.ply');
-// Default "up" axis: STL from CAD is Z-up; splats are usually Y-up.
 const upAxis = (flags.up || (isPly ? 'y' : 'z')).toLowerCase();
 
-// Map a source point so the chosen source axis points to three.js +Y, then yaw.
+// ------------------------------------------------------------- orientation
+// Build the 3x3 world transform as a real matrix (row-major rows[r][c]) so the
+// same rotation can be applied to gaussian orientations, not just centres.
+function upMatrix(axis) {
+  switch (axis) {
+    // rows map source (x,y,z) -> three (x,y,z); chosen axis ends up on +Y
+    case 'x': return [[0, 1, 0], [1, 0, 0], [0, 0, 1]];   // reflection (det -1)
+    case '-x': return [[0, -1, 0], [-1, 0, 0], [0, 0, 1]]; // reflection (det -1)
+    case 'y': return [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+    case '-y': return [[1, 0, 0], [0, -1, 0], [0, 0, -1]];
+    case 'z': return [[1, 0, 0], [0, 0, 1], [0, -1, 0]];
+    case '-z': return [[1, 0, 0], [0, 0, -1], [0, 1, 0]];
+    default: return [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+  }
+}
+function matMul(a, b) {
+  const m = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+  for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) {
+    m[r][c] = a[r][0] * b[0][c] + a[r][1] * b[1][c] + a[r][2] * b[2][c];
+  }
+  return m;
+}
+function det3(m) {
+  return (
+    m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) -
+    m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) +
+    m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+  );
+}
+const yawMatrix = [[Math.cos(yaw), 0, Math.sin(yaw)], [0, 1, 0], [-Math.sin(yaw), 0, Math.cos(yaw)]];
+const M = matMul(yawMatrix, upMatrix(upAxis));
+
 function reorient(x, y, z) {
-  let v;
-  switch (upAxis) {
-    case 'x': v = [y, x, z]; break;
-    case '-x': v = [-y, -x, z]; break;
-    case 'y': v = [x, y, z]; break;
-    case '-y': v = [x, -y, -z]; break;
-    case 'z': v = [x, z, -y]; break;
-    case '-z': v = [x, -z, y]; break;
-    default: v = [x, y, z];
-  }
-  if (yaw) {
-    const c = Math.cos(yaw), s = Math.sin(yaw);
-    v = [v[0] * c + v[2] * s, v[1], -v[0] * s + v[2] * c];
-  }
-  return v;
+  return [
+    M[0][0] * x + M[0][1] * y + M[0][2] * z,
+    M[1][0] * x + M[1][1] * y + M[1][2] * z,
+    M[2][0] * x + M[2][1] * y + M[2][2] * z,
+  ];
 }
 
-// Robust normalise: centre on the 2nd..98th percentile midpoint and scale the
-// largest percentile span to a fixed world size (ignores stray outliers).
+// A gaussian's covariance transforms as S' = M S M^T, which is quadratic in M —
+// so for a reflection (det -1, e.g. --up x) we can negate M to get an equivalent
+// proper rotation and still land on the same ellipsoid. Centres keep the real M.
+const Mrot = det3(M) < 0 ? M.map((r) => r.map((v) => -v)) : M;
+
+// Rotation matrix -> quaternion (x,y,z,w).
+function quatFromMatrix(m) {
+  const tr = m[0][0] + m[1][1] + m[2][2];
+  let x, y, z, w;
+  if (tr > 0) {
+    const s = Math.sqrt(tr + 1) * 2;
+    w = 0.25 * s;
+    x = (m[2][1] - m[1][2]) / s;
+    y = (m[0][2] - m[2][0]) / s;
+    z = (m[1][0] - m[0][1]) / s;
+  } else if (m[0][0] > m[1][1] && m[0][0] > m[2][2]) {
+    const s = Math.sqrt(1 + m[0][0] - m[1][1] - m[2][2]) * 2;
+    w = (m[2][1] - m[1][2]) / s;
+    x = 0.25 * s;
+    y = (m[0][1] + m[1][0]) / s;
+    z = (m[0][2] + m[2][0]) / s;
+  } else if (m[1][1] > m[2][2]) {
+    const s = Math.sqrt(1 + m[1][1] - m[0][0] - m[2][2]) * 2;
+    w = (m[0][2] - m[2][0]) / s;
+    x = (m[0][1] + m[1][0]) / s;
+    y = 0.25 * s;
+    z = (m[1][2] + m[2][1]) / s;
+  } else {
+    const s = Math.sqrt(1 + m[2][2] - m[0][0] - m[1][1]) * 2;
+    w = (m[1][0] - m[0][1]) / s;
+    x = (m[0][2] + m[2][0]) / s;
+    y = (m[1][2] + m[2][1]) / s;
+    z = 0.25 * s;
+  }
+  return [x, y, z, w];
+}
+const qM = quatFromMatrix(Mrot);
+
+// Hamilton product (x,y,z,w) — applies the world rotation on top of the gaussian's.
+function quatMul(a, b) {
+  return [
+    a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
+    a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
+    a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
+    a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2],
+  ];
+}
+
+// ------------------------------------------------------------- normalisation
+// Centre on the 2nd..98th percentile midpoint and scale the largest percentile
+// span to a fixed world size (ignores stray floaters). Returns the scale factor
+// so gaussian sizes can be shrunk by the same amount.
 function normalise(pos, count) {
   const targetSize = 5;
   const pick = (axis) => {
@@ -78,11 +155,12 @@ function normalise(pos, count) {
     pos[i * 3 + 1] = (pos[i * 3 + 1] - py.c) * scale;
     pos[i * 3 + 2] = (pos[i * 3 + 2] - pz.c) * scale;
   }
+  return scale;
 }
 
-function writeBin(p, arr) {
+function writeBin(p, buf) {
   fs.mkdirSync(path.dirname(p), { recursive: true });
-  fs.writeFileSync(p, Buffer.from(arr.buffer, arr.byteOffset, arr.byteLength));
+  fs.writeFileSync(p, buf);
 }
 
 // ---------------------------------------------------------------- STL (mesh)
@@ -137,8 +215,10 @@ function fromStl() {
     }
   }
   normalise(pos, N);
-  writeBin(outPath, pos);
+  writeBin(outPath, Buffer.from(pos.buffer, pos.byteOffset, pos.byteLength));
   console.log(`STL: ${triCount} triangles -> ${N} points (${(pos.byteLength / 1024).toFixed(0)} KB), up=${upAxis}`);
+  console.log(`  positions -> ${outPath}`);
+  console.log('  (mesh has no gaussian params — the hero renders these as small isotropic splats)');
 }
 
 // --------------------------------------------------------------- PLY (3DGS)
@@ -168,7 +248,7 @@ function fromPly() {
   const header = buf.toString('ascii', 0, ehIdx).split(/\r?\n/);
   let format = 'binary_little_endian';
   let vertexCount = 0;
-  const props = []; // {name, type} for the vertex element, in order
+  const props = [];
   let inVertex = false;
   for (const line of header) {
     const t = line.trim().split(/\s+/);
@@ -180,84 +260,123 @@ function fromPly() {
   const idx = (n) => props.findIndex((p) => p.name === n);
   const iX = idx('x'), iY = idx('y'), iZ = idx('z');
   const iDC0 = idx('f_dc_0'), iDC1 = idx('f_dc_1'), iDC2 = idx('f_dc_2');
-  const iRed = idx('red'), iOpacity = idx('opacity');
+  const iRed = idx('red'), iGreen = idx('green'), iBlue = idx('blue');
+  const iOpacity = idx('opacity');
+  const iS0 = idx('scale_0'), iS1 = idx('scale_1'), iS2 = idx('scale_2');
+  const iR0 = idx('rot_0'), iR1 = idx('rot_1'), iR2 = idx('rot_2'), iR3 = idx('rot_3');
   if (iX < 0 || iY < 0 || iZ < 0) { console.error('PLY missing x/y/z.'); process.exit(1); }
+  const hasGauss = iS0 >= 0 && iR0 >= 0;
+  if (!hasGauss) {
+    console.warn('PLY has no scale_*/rot_* — not a 3DGS export. Falling back to isotropic splats.');
+  }
 
   const SH_C0 = 0.28209479177387814;
   const sigmoid = (x) => 1 / (1 + Math.exp(-x));
   const toColor = (dc) => Math.min(1, Math.max(0, 0.5 + SH_C0 * dc));
 
-  // gather kept points
-  const keepPos = [];
-  const keepCol = [];
-
   if (format === 'ascii') {
-    const body = buf.toString('ascii', bodyOff).trim().split(/\s+/);
-    const stride = props.length;
-    for (let v = 0; v < vertexCount; v++) {
-      const base = v * stride;
-      const alpha = iOpacity >= 0 ? sigmoid(parseFloat(body[base + iOpacity])) : 1;
-      if (alpha < minAlpha) continue;
-      const r = reorient(+body[base + iX], +body[base + iY], +body[base + iZ]);
-      keepPos.push(r[0], r[1], r[2]);
-      if (iDC0 >= 0) keepCol.push(toColor(+body[base + iDC0]), toColor(+body[base + iDC1]), toColor(+body[base + iDC2]));
-      else if (iRed >= 0) keepCol.push(+body[base + iRed] / 255, +body[base + idx('green')] / 255, +body[base + idx('blue')] / 255);
-      else keepCol.push(1, 1, 1);
-    }
-  } else {
-    const le = format === 'binary_little_endian';
-    const offs = [];
-    let stride = 0;
-    for (const p of props) { offs.push(stride); stride += TYPE_SIZE[p.type] || 4; }
-    const dv = new DataView(buf.buffer, buf.byteOffset + bodyOff, buf.byteLength - bodyOff);
-    for (let v = 0; v < vertexCount; v++) {
-      const b = v * stride;
-      const alpha = iOpacity >= 0 ? sigmoid(readProp(dv, b + offs[iOpacity], props[iOpacity].type, le)) : 1;
-      if (alpha < minAlpha) continue;
-      const x = readProp(dv, b + offs[iX], props[iX].type, le);
-      const y = readProp(dv, b + offs[iY], props[iY].type, le);
-      const z = readProp(dv, b + offs[iZ], props[iZ].type, le);
-      const r = reorient(x, y, z);
-      keepPos.push(r[0], r[1], r[2]);
-      if (iDC0 >= 0) {
-        keepCol.push(
-          toColor(readProp(dv, b + offs[iDC0], props[iDC0].type, le)),
-          toColor(readProp(dv, b + offs[iDC1], props[iDC1].type, le)),
-          toColor(readProp(dv, b + offs[iDC2], props[iDC2].type, le))
-        );
-      } else if (iRed >= 0) {
-        keepCol.push(
-          readProp(dv, b + offs[iRed], props[iRed].type, le) / 255,
-          readProp(dv, b + offs[idx('green')], props[idx('green')].type, le) / 255,
-          readProp(dv, b + offs[idx('blue')], props[idx('blue')].type, le) / 255
-        );
-      } else keepCol.push(1, 1, 1);
-    }
+    console.error('ASCII 3DGS PLY is not supported for the splat path (exports are binary). Re-export as binary.');
+    process.exit(1);
   }
 
-  const kept = keepPos.length / 3;
+  const le = format === 'binary_little_endian';
+  const offs = [];
+  let stride = 0;
+  for (const p of props) { offs.push(stride); stride += TYPE_SIZE[p.type] || 4; }
+  const expected = bodyOff + vertexCount * stride;
+  if (expected > buf.length) {
+    console.error(`PLY body truncated: header wants ${expected} bytes, file is ${buf.length}.`);
+    process.exit(1);
+  }
+  const dv = new DataView(buf.buffer, buf.byteOffset + bodyOff, buf.byteLength - bodyOff);
+  const rd = (b, i) => readProp(dv, b + offs[i], props[i].type, le);
+
+  // Pass 1: which gaussians survive the opacity floor.
+  const keep = [];
+  for (let v = 0; v < vertexCount; v++) {
+    const b = v * stride;
+    const alpha = iOpacity >= 0 ? sigmoid(rd(b, iOpacity)) : 1;
+    if (alpha >= minAlpha) keep.push(v);
+  }
+  const kept = keep.length;
   if (kept === 0) { console.error('No gaussians kept — lower --min-alpha.'); process.exit(1); }
 
-  // subsample kept -> N
+  // Pass 2: subsample kept -> N, decoding full gaussian params.
   const count = Math.min(N, kept);
+  const step = kept / count;
   const pos = new Float32Array(count * 3);
-  const col = new Float32Array(count * 3);
-  const stride = kept / count;
-  for (let n = 0; n < count; n++) {
-    const s = Math.floor(n * stride);
-    for (let j = 0; j < 3; j++) {
-      pos[n * 3 + j] = keepPos[s * 3 + j];
-      col[n * 3 + j] = keepCol[s * 3 + j];
-    }
-  }
-  normalise(pos, count);
+  const scl = new Float32Array(count * 3);
+  const col = new Float32Array(count * 4);
+  const quat = new Float32Array(count * 4);
 
-  const colorsPath = outPath.replace(/\.bin$/, '') + '-colors.bin';
-  writeBin(outPath, pos);
-  writeBin(colorsPath, col);
-  console.log(`PLY: ${vertexCount} gaussians, ${kept} kept (alpha>=${minAlpha}) -> ${count} points, up=${upAxis} yaw=${(yaw * 180) / Math.PI}`);
-  console.log(`  positions -> ${outPath} (${(pos.byteLength / 1024).toFixed(0)} KB)`);
-  console.log(`  colors    -> ${colorsPath} (${(col.byteLength / 1024).toFixed(0)} KB)`);
+  for (let n = 0; n < count; n++) {
+    const b = keep[Math.floor(n * step)] * stride;
+
+    const r = reorient(rd(b, iX), rd(b, iY), rd(b, iZ));
+    pos[n * 3] = r[0]; pos[n * 3 + 1] = r[1]; pos[n * 3 + 2] = r[2];
+
+    // 3DGS stores scale in log space and rotation as a (w,x,y,z) quaternion.
+    if (hasGauss) {
+      scl[n * 3] = Math.exp(rd(b, iS0));
+      scl[n * 3 + 1] = Math.exp(rd(b, iS1));
+      scl[n * 3 + 2] = Math.exp(rd(b, iS2));
+      const qw = rd(b, iR0), qx = rd(b, iR1), qy = rd(b, iR2), qz = rd(b, iR3);
+      const len = Math.hypot(qw, qx, qy, qz) || 1;
+      const q = quatMul(qM, [qx / len, qy / len, qz / len, qw / len]);
+      quat[n * 4] = q[0]; quat[n * 4 + 1] = q[1]; quat[n * 4 + 2] = q[2]; quat[n * 4 + 3] = q[3];
+    } else {
+      scl[n * 3] = scl[n * 3 + 1] = scl[n * 3 + 2] = 0.004;
+      quat[n * 4 + 3] = 1;
+    }
+
+    if (iDC0 >= 0) {
+      col[n * 4] = toColor(rd(b, iDC0));
+      col[n * 4 + 1] = toColor(rd(b, iDC1));
+      col[n * 4 + 2] = toColor(rd(b, iDC2));
+    } else if (iRed >= 0) {
+      col[n * 4] = rd(b, iRed) / 255;
+      col[n * 4 + 1] = rd(b, iGreen) / 255;
+      col[n * 4 + 2] = rd(b, iBlue) / 255;
+    } else {
+      col[n * 4] = col[n * 4 + 1] = col[n * 4 + 2] = 1;
+    }
+    col[n * 4 + 3] = iOpacity >= 0 ? sigmoid(rd(b, iOpacity)) : 1;
+  }
+
+  // Normalising the centres must shrink the gaussians by the same factor.
+  const s = normalise(pos, count);
+  for (let i = 0; i < count * 3; i++) scl[i] *= s;
+
+  // Pack to the 32-byte .splat layout.
+  const out = Buffer.alloc(count * 32);
+  const u8 = (v) => Math.max(0, Math.min(255, Math.round(v)));
+  for (let n = 0; n < count; n++) {
+    const o = n * 32;
+    out.writeFloatLE(pos[n * 3], o);
+    out.writeFloatLE(pos[n * 3 + 1], o + 4);
+    out.writeFloatLE(pos[n * 3 + 2], o + 8);
+    out.writeFloatLE(scl[n * 3], o + 12);
+    out.writeFloatLE(scl[n * 3 + 1], o + 16);
+    out.writeFloatLE(scl[n * 3 + 2], o + 20);
+    out[o + 24] = u8(col[n * 4] * 255);
+    out[o + 25] = u8(col[n * 4 + 1] * 255);
+    out[o + 26] = u8(col[n * 4 + 2] * 255);
+    out[o + 27] = u8(col[n * 4 + 3] * 255);
+    // quat wxyz, encoded v*128 + 128
+    out[o + 28] = u8(quat[n * 4 + 3] * 128 + 128);
+    out[o + 29] = u8(quat[n * 4] * 128 + 128);
+    out[o + 30] = u8(quat[n * 4 + 1] * 128 + 128);
+    out[o + 31] = u8(quat[n * 4 + 2] * 128 + 128);
+  }
+
+  const splatPath = outPath.replace(/\.bin$/, '') + '-splats.bin';
+  writeBin(splatPath, out);
+
+  let sMin = Infinity, sMax = -Infinity, sSum = 0;
+  for (let i = 0; i < count * 3; i++) { const v = scl[i]; if (v < sMin) sMin = v; if (v > sMax) sMax = v; sSum += v; }
+  console.log(`PLY: ${vertexCount} gaussians, ${kept} kept (alpha>=${minAlpha}) -> ${count} splats, up=${upAxis} yaw=${(yaw * 180) / Math.PI}`);
+  console.log(`  splats -> ${splatPath} (${(out.length / 1048576).toFixed(2)} MB)`);
+  console.log(`  gaussian scale: min=${sMin.toFixed(4)} mean=${(sSum / (count * 3)).toFixed(4)} max=${sMax.toFixed(4)} (world units, model spans ~5)`);
 }
 
 if (isPly) fromPly();
