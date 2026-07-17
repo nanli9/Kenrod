@@ -1,25 +1,34 @@
 'use client';
 
-import { useLocale, useTranslations } from 'next-intl';
+import { useLocale } from 'next-intl';
 import { useRouter, usePathname } from '@/i18n/navigation';
+
+const LOCALES = [
+  { code: 'en' as const, label: 'EN' },
+  { code: 'zh' as const, label: '中文' },
+];
 
 export default function LanguageSwitcher() {
   const locale = useLocale();
   const router = useRouter();
   const pathname = usePathname();
-  const t = useTranslations('common');
-
-  const switchLocale = () => {
-    const nextLocale = locale === 'en' ? 'zh' : 'en';
-    router.replace(pathname, { locale: nextLocale });
-  };
 
   return (
-    <button
-      onClick={switchLocale}
-      className="px-3 py-1 text-sm border border-gray-500 rounded hover:bg-white/10 transition-colors"
-    >
-      {t('switch_language')}
-    </button>
+    <div className="flex items-center border border-white/10 rounded-full p-0.5">
+      {LOCALES.map(({ code, label }) => (
+        <button
+          key={code}
+          onClick={() => router.replace(pathname, { locale: code })}
+          aria-pressed={locale === code}
+          className={`h-7 px-3 rounded-full font-mono text-[10px] tracking-wider transition-colors ${
+            locale === code
+              ? 'bg-white/10 text-white'
+              : 'text-steel-dim hover:text-steel-light'
+          }`}
+        >
+          {label}
+        </button>
+      ))}
+    </div>
   );
 }

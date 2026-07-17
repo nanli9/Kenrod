@@ -1,8 +1,12 @@
-import type { Metadata } from 'next';
+import type { Metadata, Viewport } from 'next';
 
 export const metadata: Metadata = {
-  title: 'Kenrod Manufacturing',
-  description: 'Kenrod - Precision Engineering, Exceptional Quality',
+  title: 'Kenrod 国友 — Precision Manufacturing',
+  description: 'Kenrod — Precision Engineering, Exceptional Quality',
+};
+
+export const viewport: Viewport = {
+  themeColor: '#04060b',
 };
 
 export default function RootLayout({

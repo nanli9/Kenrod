@@ -7,5 +7,49 @@ html {
 }
 
 body {
-  font-family: system-ui, -apple-system, sans-serif;
+  background-color: #04060b;
+  color: #dbe6f3;
+  font-family: var(--font-inter), system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: rgba(56, 223, 255, 0.25);
+  color: #ffffff;
+}
+
+:focus-visible {
+  outline: 1px solid rgba(56, 223, 255, 0.7);
+  outline-offset: 3px;
+}
+
+/* Thin dark scrollbar so the chrome matches the page */
+::-webkit-scrollbar {
+  width: 10px;
+}
+::-webkit-scrollbar-track {
+  background: #04060b;
+}
+::-webkit-scrollbar-thumb {
+  background: #1a2233;
+  border-radius: 5px;
+  border: 2px solid #04060b;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #2a3345;
+}
+
+@layer utilities {
+  /* Faint blueprint grid for section backgrounds */
+  .tech-grid {
+    background-image:
+      linear-gradient(to right, rgba(148, 180, 216, 0.05) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(148, 180, 216, 0.05) 1px, transparent 1px);
+    background-size: 72px 72px;
+  }
+  .tech-grid-fade {
+    -webkit-mask-image: radial-gradient(ellipse 90% 80% at 50% 40%, black 30%, transparent 100%);
+    mask-image: radial-gradient(ellipse 90% 80% at 50% 40%, black 30%, transparent 100%);
+  }
 }

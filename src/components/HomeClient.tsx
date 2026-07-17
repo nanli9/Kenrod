@@ -1,77 +1,118 @@
 'use client';
 
+import Image from 'next/image';
+import { useTranslations } from 'next-intl';
 import ScrollScene from '@/components/three/ScrollScene';
 
-interface HomeClientProps {
-  hero: {
-    title: string;
-    subtitle: string;
-    scrollHint: string;
-  };
-  stages: { title: string; text: string }[];
-  products: {
-    title: string;
-    description: string;
-    buyShopify: string;
-    buyAmazon: string;
-    items: { name: string; desc: string }[];
-  };
-  about: {
-    title: string;
-    description: string;
-    capabilities: { title: string; text: string }[];
-  };
-  contact: {
-    title: string;
-    description: string;
-    emailCta: string;
-    emailAddress: string;
-    followUs: string;
-    address: string;
-  };
+/* Corner tick marks — revealed on hover, the "measured drawing" detail */
+function CornerTicks() {
+  const base =
+    'pointer-events-none absolute h-3 w-3 border-accent/0 group-hover:border-accent/70 transition-colors duration-300';
+  return (
+    <>
+      <span aria-hidden className={`${base} -top-px -left-px border-t border-l`} />
+      <span aria-hidden className={`${base} -top-px -right-px border-t border-r`} />
+      <span aria-hidden className={`${base} -bottom-px -left-px border-b border-l`} />
+      <span aria-hidden className={`${base} -bottom-px -right-px border-b border-r`} />
+    </>
+  );
 }
 
-function ProductsSection({ products }: { products: HomeClientProps['products'] }) {
+function Eyebrow({ index, children }: { index: string; children: React.ReactNode }) {
   return (
-    <section id="products" className="py-20 px-4 bg-white">
-      <div className="max-w-7xl mx-auto">
-        <h2 className="text-3xl md:text-4xl font-bold text-center mb-4">
-          {products.title}
-        </h2>
-        <p className="text-center text-gray-600 mb-12">
-          {products.description}
-        </p>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-8">
-          {products.items.map((item, i) => (
+    <p className="flex items-center gap-3 font-mono text-[11px] uppercase tracking-[0.35em] text-accent/80 mb-5">
+      <span aria-hidden className="h-px w-8 bg-accent/50" />
+      {index} / {children}
+    </p>
+  );
+}
+
+// 1: blue table in marble room · 5: closed-top dining mode · 3: walnut, top-down
+// (2/4/6 are alternates; 2 and 4 carry large baked-in poster text)
+const PRODUCT_IMAGES = [
+  '/images/products/product-1.jpg',
+  '/images/products/product-5.jpg',
+  '/images/products/product-3.jpg',
+];
+
+function ProductsSection() {
+  const t = useTranslations();
+  const items = [1, 2, 3].map((n, i) => ({
+    name: t(`products.product${n}_name`),
+    desc: t(`products.product${n}_desc`),
+    image: PRODUCT_IMAGES[i],
+  }));
+
+  return (
+    <section id="products" className="relative scroll-mt-16 py-24 md:py-32 px-4 sm:px-6 lg:px-8 bg-ink overflow-hidden">
+      <div aria-hidden className="absolute inset-0 tech-grid tech-grid-fade" />
+      <div className="relative max-w-7xl mx-auto">
+        <div className="flex flex-col md:flex-row md:items-end md:justify-between gap-6 mb-14 md:mb-20">
+          <div>
+            <Eyebrow index="01">{t('nav.products')}</Eyebrow>
+            <h2 className="font-display text-3xl md:text-5xl font-semibold tracking-tight text-white">
+              {t('products.title')}
+            </h2>
+          </div>
+          <p className="max-w-sm text-sm leading-relaxed text-steel-mid md:text-right">
+            {t('products.description')}
+          </p>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5 lg:gap-6">
+          {items.map((item, i) => (
             <div
               key={i}
-              className="border border-gray-200 rounded-lg overflow-hidden hover:shadow-lg transition-shadow"
+              className="group relative border border-white/[0.07] bg-ink-card hover:border-accent/40 transition-colors duration-300"
             >
-              <div className="h-48 bg-gray-100 flex items-center justify-center">
-                <span className="text-gray-400 text-sm font-mono">
-                  Product Image
-                </span>
+              <CornerTicks />
+              <div className="relative aspect-[4/5] overflow-hidden">
+                <Image
+                  src={item.image}
+                  alt={item.name}
+                  fill
+                  sizes="(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 33vw"
+                  className="object-cover transition-transform duration-700 group-hover:scale-[1.04]"
+                />
+                <div
+                  aria-hidden
+                  className="absolute inset-0 bg-gradient-to-t from-ink-card via-transparent to-transparent opacity-80"
+                />
               </div>
               <div className="p-6">
-                <h3 className="text-lg font-semibold mb-2">{item.name}</h3>
-                <p className="text-gray-600 text-sm">{item.desc}</p>
+                <div className="flex items-center justify-between mb-3">
+                  <span className="font-mono text-[10px] tracking-[0.3em] text-steel-dim">
+                    UNIT {String(i + 1).padStart(2, '0')}
+                  </span>
+                  <span
+                    aria-hidden
+                    className="font-mono text-xs text-steel-dim group-hover:text-accent group-hover:translate-x-0.5 transition-all"
+                  >
+                    ↗
+                  </span>
+                </div>
+                <h3 className="font-display text-lg font-semibold text-white mb-2">
+                  {item.name}
+                </h3>
+                <p className="text-sm leading-relaxed text-steel-mid">{item.desc}</p>
               </div>
             </div>
           ))}
         </div>
+
         {/* TODO: Replace # with actual store URLs */}
-        <div className="flex justify-center gap-4 mt-12">
+        <div className="flex flex-wrap justify-center gap-4 mt-14 md:mt-16">
           <a
             href="#"
-            className="px-8 py-3 bg-accent text-white text-base font-medium rounded-lg hover:bg-red-600 transition-colors"
+            className="inline-flex h-12 items-center px-8 rounded-full bg-white text-ink text-sm font-medium tracking-wide hover:bg-steel-light transition-colors"
           >
-            {products.buyShopify}
+            {t('products.buy_shopify')}
           </a>
           <a
             href="#"
-            className="px-8 py-3 border border-gray-300 text-gray-700 text-base font-medium rounded-lg hover:bg-gray-50 transition-colors"
+            className="inline-flex h-12 items-center px-8 rounded-full border border-white/15 text-steel-light text-sm font-medium tracking-wide hover:border-accent/50 hover:text-white transition-colors"
           >
-            {products.buyAmazon}
+            {t('products.buy_amazon')}
           </a>
         </div>
       </div>
@@ -79,98 +120,170 @@ function ProductsSection({ products }: { products: HomeClientProps['products'] }
   );
 }
 
-function AboutSection({ about }: { about: HomeClientProps['about'] }) {
+function AboutSection() {
+  const t = useTranslations();
+  const capabilities = [1, 2, 3].map((n) => ({
+    title: t(`about.capability${n}_title`),
+    text: t(`about.capability${n}_text`),
+  }));
+  // TODO: placeholder figures — replace with real company numbers
+  const stats = [1, 2, 3, 4].map((n) => ({
+    value: t(`about.stat${n}_value`),
+    label: t(`about.stat${n}_label`),
+  }));
+
   return (
-    <section id="about" className="py-20 px-4 bg-primary text-white">
+    <section id="about" className="relative scroll-mt-16 py-24 md:py-32 px-4 sm:px-6 lg:px-8 bg-ink-raised border-y border-white/[0.05]">
       <div className="max-w-7xl mx-auto">
-        <h2 className="text-3xl md:text-4xl font-bold text-center mb-4">
-          {about.title}
-        </h2>
-        <p className="text-center text-gray-300 mb-12 max-w-2xl mx-auto">
-          {about.description}
-        </p>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
-          {about.capabilities.map((cap, i) => (
-            <div
-              key={i}
-              className="bg-white/5 border border-white/10 rounded-lg p-6 hover:bg-white/10 transition-colors"
-            >
-              <h3 className="text-lg font-semibold text-accent mb-2">
-                {cap.title}
-              </h3>
-              <p className="text-gray-400 text-sm">{cap.text}</p>
-            </div>
-          ))}
-        </div>
-      </div>
-    </section>
-  );
-}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-12 lg:gap-20">
+          <div className="lg:sticky lg:top-28 self-start">
+            <Eyebrow index="02">{t('nav.about')}</Eyebrow>
+            <h2 className="font-display text-3xl md:text-5xl font-semibold tracking-tight text-white mb-6">
+              {t('about.title')}
+            </h2>
+            <p className="text-base leading-relaxed text-steel-mid max-w-lg">
+              {t('about.description')}
+            </p>
+          </div>
 
-function ContactSection({ contact }: { contact: HomeClientProps['contact'] }) {
-  return (
-    <section id="contact" className="py-20 px-4 bg-white">
-      <div className="max-w-3xl mx-auto text-center">
-        <h2 className="text-3xl md:text-4xl font-bold mb-4">
-          {contact.title}
-        </h2>
-        <p className="text-gray-600 mb-8">{contact.description}</p>
-
-        {/* Email CTA */}
-        <a
-          href={`mailto:${contact.emailAddress}`}
-          className="inline-block bg-accent text-white px-8 py-4 rounded-lg text-lg font-medium hover:bg-red-600 transition-colors mb-12"
-        >
-          {contact.emailCta}
-        </a>
-
-        {/* Social Media Links */}
-        <div className="mb-8">
-          <p className="text-gray-500 text-sm mb-4">{contact.followUs}</p>
-          <div className="flex justify-center gap-6">
-            {/* TODO: Replace # with actual social media URLs */}
-            <a href="#" className="text-gray-400 hover:text-accent transition-colors" aria-label="WeChat">
-              <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 24 24">
-                <path d="M8.691 2.188C3.891 2.188 0 5.476 0 9.53c0 2.212 1.17 4.203 3.002 5.55a.59.59 0 0 1 .213.665l-.39 1.48c-.019.07-.048.141-.048.213 0 .163.13.295.29.295a.326.326 0 0 0 .167-.054l1.903-1.114a.864.864 0 0 1 .717-.098 10.16 10.16 0 0 0 2.837.403c.276 0 .543-.027.811-.05-.857-2.578.157-4.972 1.932-6.446 1.703-1.415 3.882-1.98 5.853-1.838-.576-3.583-4.196-6.348-8.596-6.348zM5.785 5.991c.642 0 1.162.529 1.162 1.18a1.17 1.17 0 0 1-1.162 1.178A1.17 1.17 0 0 1 4.623 7.17c0-.651.52-1.18 1.162-1.18zm5.813 0c.642 0 1.162.529 1.162 1.18a1.17 1.17 0 0 1-1.162 1.178 1.17 1.17 0 0 1-1.162-1.178c0-.651.52-1.18 1.162-1.18zm3.636 4.3c-1.659-.062-3.215.458-4.369 1.416-1.196.992-1.986 2.467-1.986 4.15 0 .401.065.79.162 1.17.642 2.503 3.235 4.347 6.2 4.347.58 0 1.143-.079 1.685-.228a.55.55 0 0 1 .456.063l1.203.703a.222.222 0 0 0 .107.035.187.187 0 0 0 .183-.186c0-.046-.018-.09-.03-.135l-.248-.935a.374.374 0 0 1 .135-.42C20.436 19.756 21.3 18.25 21.3 16.6c0-.4-.065-.79-.162-1.169-.642-2.503-3.235-4.347-6.2-4.347a7.727 7.727 0 0 0-.704.032zm-2.079 2.294c.407 0 .737.336.737.748a.743.743 0 0 1-.737.749.743.743 0 0 1-.737-.749c0-.412.33-.748.737-.748zm3.692 0c.407 0 .736.336.736.748a.743.743 0 0 1-.736.749.743.743 0 0 1-.737-.749c0-.412.33-.748.737-.748z" />
-              </svg>
-            </a>
-            <a href="#" className="text-gray-400 hover:text-accent transition-colors" aria-label="Instagram">
-              <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 24 24">
-                <path d="M12 2.163c3.204 0 3.584.012 4.85.07 3.252.148 4.771 1.691 4.919 4.919.058 1.265.069 1.645.069 4.849 0 3.205-.012 3.584-.069 4.849-.149 3.225-1.664 4.771-4.919 4.919-1.266.058-1.644.07-4.85.07-3.204 0-3.584-.012-4.849-.07-3.26-.149-4.771-1.699-4.919-4.92-.058-1.265-.07-1.644-.07-4.849 0-3.204.013-3.583.07-4.849.149-3.227 1.664-4.771 4.919-4.919 1.266-.057 1.645-.069 4.849-.069zM12 0C8.741 0 8.333.014 7.053.072 2.695.272.273 2.69.073 7.052.014 8.333 0 8.741 0 12c0 3.259.014 3.668.072 4.948.2 4.358 2.618 6.78 6.98 6.98C8.333 23.986 8.741 24 12 24c3.259 0 3.668-.014 4.948-.072 4.354-.2 6.782-2.618 6.979-6.98.059-1.28.073-1.689.073-4.948 0-3.259-.014-3.667-.072-4.947-.196-4.354-2.617-6.78-6.979-6.98C15.668.014 15.259 0 12 0zm0 5.838a6.162 6.162 0 1 0 0 12.324 6.162 6.162 0 0 0 0-12.324zM12 16a4 4 0 1 1 0-8 4 4 0 0 1 0 8zm6.406-11.845a1.44 1.44 0 1 0 0 2.881 1.44 1.44 0 0 0 0-2.881z" />
-              </svg>
-            </a>
-            <a href="#" className="text-gray-400 hover:text-accent transition-colors" aria-label="LinkedIn">
-              <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 24 24">
-                <path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 0 1-2.063-2.065 2.064 2.064 0 1 1 2.063 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z" />
-              </svg>
-            </a>
-            <a href="#" className="text-gray-400 hover:text-accent transition-colors" aria-label="Facebook">
-              <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 24 24">
-                <path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z" />
-              </svg>
-            </a>
+          <div className="divide-y divide-white/[0.07] border-y border-white/[0.07]">
+            {capabilities.map((cap, i) => (
+              <div key={i} className="group flex gap-6 py-8">
+                <span className="font-mono text-xs text-accent/70 pt-1.5">
+                  {String(i + 1).padStart(2, '0')}
+                </span>
+                <div>
+                  <h3 className="font-display text-lg md:text-xl font-semibold text-white mb-2 group-hover:text-accent-soft transition-colors">
+                    {cap.title}
+                  </h3>
+                  <p className="text-sm leading-relaxed text-steel-mid">{cap.text}</p>
+                </div>
+              </div>
+            ))}
           </div>
         </div>
 
-        <p className="text-gray-400 text-sm">{contact.address}</p>
+        <div className="mt-20 md:mt-24 grid grid-cols-2 lg:grid-cols-4 gap-px bg-white/[0.07] border border-white/[0.07]">
+          {stats.map((stat, i) => (
+            <div key={i} className="bg-ink-raised p-7 md:p-9">
+              <p className="font-display text-3xl md:text-4xl font-semibold text-white mb-2">
+                {stat.value}
+              </p>
+              <p className="font-mono text-[10px] uppercase tracking-[0.25em] text-steel-dim leading-relaxed">
+                {stat.label}
+              </p>
+            </div>
+          ))}
+        </div>
       </div>
     </section>
   );
 }
 
-export default function HomeClient({
-  hero,
-  stages,
-  products,
-  about,
-  contact,
-}: HomeClientProps) {
+const SOCIALS: { label: string; path: string }[] = [
+  {
+    label: 'WeChat',
+    path: 'M8.691 2.188C3.891 2.188 0 5.476 0 9.53c0 2.212 1.17 4.203 3.002 5.55a.59.59 0 0 1 .213.665l-.39 1.48c-.019.07-.048.141-.048.213 0 .163.13.295.29.295a.326.326 0 0 0 .167-.054l1.903-1.114a.864.864 0 0 1 .717-.098 10.16 10.16 0 0 0 2.837.403c.276 0 .543-.027.811-.05-.857-2.578.157-4.972 1.932-6.446 1.703-1.415 3.882-1.98 5.853-1.838-.576-3.583-4.196-6.348-8.596-6.348zM5.785 5.991c.642 0 1.162.529 1.162 1.18a1.17 1.17 0 0 1-1.162 1.178A1.17 1.17 0 0 1 4.623 7.17c0-.651.52-1.18 1.162-1.18zm5.813 0c.642 0 1.162.529 1.162 1.18a1.17 1.17 0 0 1-1.162 1.178 1.17 1.17 0 0 1-1.162-1.178c0-.651.52-1.18 1.162-1.18zm3.636 4.3c-1.659-.062-3.215.458-4.369 1.416-1.196.992-1.986 2.467-1.986 4.15 0 .401.065.79.162 1.17.642 2.503 3.235 4.347 6.2 4.347.58 0 1.143-.079 1.685-.228a.55.55 0 0 1 .456.063l1.203.703a.222.222 0 0 0 .107.035.187.187 0 0 0 .183-.186c0-.046-.018-.09-.03-.135l-.248-.935a.374.374 0 0 1 .135-.42C20.436 19.756 21.3 18.25 21.3 16.6c0-.4-.065-.79-.162-1.169-.642-2.503-3.235-4.347-6.2-4.347a7.727 7.727 0 0 0-.704.032zm-2.079 2.294c.407 0 .737.336.737.748a.743.743 0 0 1-.737.749.743.743 0 0 1-.737-.749c0-.412.33-.748.737-.748zm3.692 0c.407 0 .736.336.736.748a.743.743 0 0 1-.736.749.743.743 0 0 1-.737-.749c0-.412.33-.748.737-.748z',
+  },
+  {
+    label: 'Instagram',
+    path: 'M12 2.163c3.204 0 3.584.012 4.85.07 3.252.148 4.771 1.691 4.919 4.919.058 1.265.069 1.645.069 4.849 0 3.205-.012 3.584-.069 4.849-.149 3.225-1.664 4.771-4.919 4.919-1.266.058-1.644.07-4.85.07-3.204 0-3.584-.012-4.849-.07-3.26-.149-4.771-1.699-4.919-4.92-.058-1.265-.07-1.644-.07-4.849 0-3.204.013-3.583.07-4.849.149-3.227 1.664-4.771 4.919-4.919 1.266-.057 1.645-.069 4.849-.069zM12 0C8.741 0 8.333.014 7.053.072 2.695.272.273 2.69.073 7.052.014 8.333 0 8.741 0 12c0 3.259.014 3.668.072 4.948.2 4.358 2.618 6.78 6.98 6.98C8.333 23.986 8.741 24 12 24c3.259 0 3.668-.014 4.948-.072 4.354-.2 6.782-2.618 6.979-6.98.059-1.28.073-1.689.073-4.948 0-3.259-.014-3.667-.072-4.947-.196-4.354-2.617-6.78-6.979-6.98C15.668.014 15.259 0 12 0zm0 5.838a6.162 6.162 0 1 0 0 12.324 6.162 6.162 0 0 0 0-12.324zM12 16a4 4 0 1 1 0-8 4 4 0 0 1 0 8zm6.406-11.845a1.44 1.44 0 1 0 0 2.881 1.44 1.44 0 0 0 0-2.881z',
+  },
+  {
+    label: 'LinkedIn',
+    path: 'M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 0 1-2.063-2.065 2.064 2.064 0 1 1 2.063 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z',
+  },
+  {
+    label: 'Facebook',
+    path: 'M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z',
+  },
+];
+
+function ContactSection() {
+  const t = useTranslations('contact');
+  const tNav = useTranslations('nav');
+
+  return (
+    <section id="contact" className="relative scroll-mt-16 py-24 md:py-36 px-4 sm:px-6 lg:px-8 bg-ink overflow-hidden">
+      <div aria-hidden className="absolute inset-0 tech-grid tech-grid-fade" />
+      <div className="relative max-w-2xl mx-auto text-center">
+        <p className="flex items-center justify-center gap-3 font-mono text-[11px] uppercase tracking-[0.35em] text-accent/80 mb-5">
+          <span aria-hidden className="h-px w-8 bg-accent/50" />
+          03 / {tNav('contact')}
+          <span aria-hidden className="h-px w-8 bg-accent/50" />
+        </p>
+        <h2 className="font-display text-3xl md:text-5xl font-semibold tracking-tight text-white mb-5">
+          {t('title')}
+        </h2>
+        <p className="text-steel-mid mb-10">{t('description')}</p>
+
+        {/* Email CTA */}
+        <div className="flex flex-col items-center gap-4 mb-14">
+          <a
+            href={`mailto:${t('email_address')}`}
+            className="inline-flex h-12 items-center px-8 rounded-full bg-white text-ink text-sm font-medium tracking-wide hover:bg-steel-light transition-colors"
+          >
+            {t('email_cta')}
+          </a>
+          <a
+            href={`mailto:${t('email_address')}`}
+            className="font-mono text-xs text-steel-dim hover:text-accent transition-colors tracking-wider"
+          >
+            {t('email_address')}
+          </a>
+        </div>
+
+        {/* Social Media Links */}
+        <div className="mb-10">
+          <p className="font-mono text-[10px] uppercase tracking-[0.3em] text-steel-dim mb-5">
+            {t('follow_us')}
+          </p>
+          <div className="flex justify-center gap-3">
+            {/* TODO: Replace # with actual social media URLs */}
+            {SOCIALS.map((s) => (
+              <a
+                key={s.label}
+                href="#"
+                aria-label={s.label}
+                className="grid place-items-center w-11 h-11 rounded-lg border border-white/10 text-steel-mid hover:text-accent hover:border-accent/40 transition-colors"
+              >
+                <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
+                  <path d={s.path} />
+                </svg>
+              </a>
+            ))}
+          </div>
+        </div>
+
+        <p className="font-mono text-xs text-steel-dim tracking-wider">{t('address')}</p>
+      </div>
+    </section>
+  );
+}
+
+export default function HomeClient() {
+  const t = useTranslations();
+
+  const stages = [1, 2, 3].map((n) => ({
+    title: t(`scroll_scene.stage${n}_title`),
+    text: t(`scroll_scene.stage${n}_text`),
+  }));
+
   return (
     <>
-      <ScrollScene hero={hero} stages={stages} />
-      <ProductsSection products={products} />
-      <AboutSection about={about} />
-      <ContactSection contact={contact} />
+      <ScrollScene
+        hero={{
+          title: t('hero.title'),
+          eyebrow: t('hero.eyebrow'),
+          subtitle: t('hero.subtitle'),
+          scrollHint: t('hero.scroll_hint'),
+          loading: t('hero.loading'),
+        }}
+        stages={stages}
+      />
+      <ProductsSection />
+      <AboutSection />
+      <ContactSection />
     </>
   );
 }

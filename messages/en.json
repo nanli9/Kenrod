@@ -7,8 +7,10 @@
   },
   "hero": {
     "title": "Kenrod Manufacturing",
+    "eyebrow": "Kenrod · 国友",
     "subtitle": "Precision Engineering, Exceptional Quality",
-    "scroll_hint": "Scroll to explore"
+    "scroll_hint": "Scroll to explore",
+    "loading": "Loading model"
   },
   "scroll_scene": {
     "stage1_title": "Precision Crafted",
@@ -20,7 +22,7 @@
   },
   "products": {
     "title": "Our Products",
-    "description": "Explore our product lineup",
+    "description": "Explore our product lineup — engineered, assembled, and inspected in-house.",
     "buy_shopify": "Buy on Shopify",
     "buy_amazon": "Buy on Amazon",
     "product1_name": "Sample Product A",
@@ -38,7 +40,15 @@
     "capability2_title": "Quality Assurance",
     "capability2_text": "ISO-certified processes and rigorous inspection.",
     "capability3_title": "Custom Solutions",
-    "capability3_text": "Tailored engineering for your specific requirements."
+    "capability3_text": "Tailored engineering for your specific requirements.",
+    "stat1_value": "10+",
+    "stat1_label": "Years manufacturing",
+    "stat2_value": "6",
+    "stat2_label": "Product series",
+    "stat3_value": "100%",
+    "stat3_label": "Units QC inspected",
+    "stat4_value": "48h",
+    "stat4_label": "Support response"
   },
   "contact": {
     "title": "Get In Touch",
@@ -50,6 +60,7 @@
   },
   "footer": {
     "copyright": "Kenrod Manufacturing. All rights reserved.",
+    "tagline": "Precision engineering, exceptional quality — designed and built in-house.",
     "address": "Factory Address Placeholder",
     "shop": "Shop",
     "social": "Social"

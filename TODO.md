@@ -37,14 +37,19 @@ Must be a **binary STL**. (Grey model, no photoreal colour — uses a brand grad
 
 ---
 
-## 2. Products section — still placeholder
+## 2. Products section — copy still placeholder
 In `messages/en.json` and `messages/zh.json`:
 - Replace `Sample Product A/B/C` names + descriptions with real products.
 
-In `src/components/HomeClient.tsx` (`ProductsSection`):
-- The cards show grey **"Product Image"** boxes. Wire in the real photos —
-  6 are already in `public/images/products/` (the `Weixin Image_*.jpg` files),
-  currently unused.
+Photos are **done**: the six `Weixin Image_*.jpg` files were renamed to
+`product-1.jpg` … `product-6.jpg` and the cards use 1 / 5 / 3 (the ones without
+big baked-in poster text — 2 and 4 carry large marketing captions). Swap the
+paths in `PRODUCT_IMAGES` (`src/components/HomeClient.tsx`) if you prefer others.
+
+## 2b. About stats — PLACEHOLDER NUMBERS ⚠️
+The stats band in the About section (`about.stat1..4` in both message files)
+ships made-up figures ("10+ years", "6 series", "100% QC", "48h response").
+**Replace with real company numbers before launch.**
 
 ---
 
@@ -60,10 +65,12 @@ In `messages/en.json` + `messages/zh.json`:
 ---
 
 ## 4. Optional polish
-- Add a "loading…" state on the hero while the model `.bin` fetches.
+- ~~Add a "loading…" state on the hero while the model `.bin` fetches.~~ Done.
 - Tune the animation beats — constants at the top of
   `src/components/three/ScrollScene.tsx`:
   `ASSEMBLE_END`, `MORPH_START`, `MORPH_END`, `BLAST_START`.
+  Note: the assembly beat now plays **on load** (time-driven, `INTRO_SECONDS`);
+  scroll drives the timeline from the formed word onward.
 - Adjust the model's resting tilt: `grp.rotation.x` in `ScrollScene.tsx`.
 
 ---

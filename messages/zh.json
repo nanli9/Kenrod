@@ -7,8 +7,10 @@
   },
   "hero": {
     "title": "Kenrod 制造",
+    "eyebrow": "Kenrod · 国友",
     "subtitle": "精密工程，卓越品质",
-    "scroll_hint": "向下滚动探索"
+    "scroll_hint": "向下滚动探索",
+    "loading": "模型加载中"
   },
   "scroll_scene": {
     "stage1_title": "精密制造",
@@ -20,7 +22,7 @@
   },
   "products": {
     "title": "我们的产品",
-    "description": "浏览我们的产品系列",
+    "description": "浏览我们的产品系列 — 自主设计、组装与全检出厂。",
     "buy_shopify": "在 Shopify 购买",
     "buy_amazon": "在亚马逊购买",
     "product1_name": "示例产品 A",
@@ -38,7 +40,15 @@
     "capability2_title": "质量保证",
     "capability2_text": "ISO认证流程和严格检验。",
     "capability3_title": "定制方案",
-    "capability3_text": "针对您的具体需求量身定制工程方案。"
+    "capability3_text": "针对您的具体需求量身定制工程方案。",
+    "stat1_value": "10+",
+    "stat1_label": "年生产经验",
+    "stat2_value": "6",
+    "stat2_label": "产品系列",
+    "stat3_value": "100%",
+    "stat3_label": "整机全检出厂",
+    "stat4_value": "48h",
+    "stat4_label": "售后响应"
   },
   "contact": {
     "title": "联系我们",
@@ -50,6 +60,7 @@
   },
   "footer": {
     "copyright": "Kenrod 制造 版权所有",
+    "tagline": "精密工程，卓越品质 — 自主设计与制造。",
     "address": "工厂地址占位符",
     "shop": "商店",
     "social": "社交媒体"

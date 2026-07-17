@@ -1,6 +1,6 @@
 'use client';
 
-import { useRef, useState, useEffect, useMemo } from 'react';
+import { useRef, useState, useEffect, useMemo, useCallback } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three';
 
@@ -8,7 +8,7 @@ import * as THREE from 'three';
 // Written by scripts/model-to-points.mjs from a .ply.
 const SPLAT_URL = '/models/mahjong-points-splats.bin';
 // Fallback for the CAD STL, which has no gaussian params: plain Float32 xyz.
-// Those get synthesised into small isotropic gaussians + a brand height gradient
+// Those get synthesised into small isotropic gaussians + a steel height gradient
 // so both sources feed the same splat renderer.
 const POINTS_URL = '/models/mahjong-points.bin';
 
@@ -18,16 +18,26 @@ const POINTS_URL = '/models/mahjong-points.bin';
 const MAX_SPLATS_DESKTOP = 150000;
 const MAX_SPLATS_MOBILE = 40000;
 
-// Scroll timeline (in smoothed progress 0..1):
-//   0.00-0.18  text flies in and assembles
+// Shader timeline (in effective progress 0..1):
+//   0.00-0.18  text assembles (played once, time-driven, on load)
 //   0.18-0.30  hold text (readable)
 //   0.30-0.55  morph text -> 3D model point cloud (+ 3D rotation ramps in)
 //   0.55-0.75  hold model (rotating)
 //   0.75-1.00  tear apart / explode
+// Scroll maps onto [ASSEMBLE_END, 1]: the assembly beat is an entrance animation,
+// not a scroll beat — at rest the page shows the formed word, never raw scatter.
 const ASSEMBLE_END = 0.18;
 const MORPH_START = 0.3;
 const MORPH_END = 0.55;
 const BLAST_START = 0.75;
+const INTRO_SECONDS = 2.4;
+// Per-splat assembly delays go up to MAX_FORM_DELAY, so each splat's travel
+// window is ASSEMBLE_END - MAX_FORM_DELAY — that way the *last* splat still
+// seats exactly at ASSEMBLE_END. Dividing by ASSEMBLE_END instead left the
+// word's right edge permanently ~10% short of home once the intro parked
+// progress at ASSEMBLE_END.
+const MAX_FORM_DELAY = 0.08;
+const ASSEMBLE_WINDOW = ASSEMBLE_END - MAX_FORM_DELAY;
 
 function lerp(a: number, b: number, t: number) {
   return a + (b - a) * t;
@@ -75,7 +85,11 @@ function sampleTextCoords(text: string) {
     lines = best;
   }
 
-  const font = (s: number) => `bold ${s}px "Helvetica Neue", Arial, sans-serif`;
+  // Space Grotesk is loaded by next/font; the caller waits on document.fonts
+  // before sampling, so the canvas can use the real display face. CJK glyphs
+  // fall through to the system faces.
+  const font = (s: number) =>
+    `700 ${s}px "Space Grotesk", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif`;
   let fontSize = 400;
   ctx.font = font(fontSize);
   let maxW = 1;
@@ -116,7 +130,7 @@ type ModelSource = {
   quat: Float32Array; // xyzw
   color: Float32Array; // rgb 0..1
   opacity: Float32Array;
-  photoreal: boolean; // false => synthesised, use the brand gradient
+  photoreal: boolean; // false => synthesised, use the steel gradient
 };
 
 // Decode the 32-byte .splat layout written by the PLY path.
@@ -213,9 +227,12 @@ function buildSplatData(text: string, src: ModelSource): SplatData {
     if (y > maxY) maxY = y;
   }
 
-  const cAccent = new THREE.Color('#e94560');
-  const cTeal = new THREE.Color('#4ecdc4');
-  const cWhite = new THREE.Color('#fff2d8');
+  // Ice/steel particle palette — cool monochrome with a restrained cyan sparkle.
+  // (The old red/teal/cream brand mix read as noise against the dark backdrop.)
+  const cIce = new THREE.Color('#e9f2fc');
+  const cSteel = new THREE.Color('#9fb4cc');
+  const cCyan = new THREE.Color('#38dfff');
+  const cDeep = new THREE.Color('#22405f');
   const tmp = new THREE.Color();
 
   const texH = Math.ceil((count * TEXELS_PER_SPLAT) / TEX_W);
@@ -230,19 +247,22 @@ function buildSplatData(text: string, src: ModelSource): SplatData {
     const ty = coords[ti * 2 + 1] ?? ch / 2;
     textHome[i3] = (tx / cw - 0.5) * worldW;
     textHome[i3 + 1] = -(ty / ch - 0.5) * worldH;
-    textHome[i3 + 2] = (Math.random() - 0.5) * 0.4;
+    // thin slab: a deep z-jitter blurs the word's edges
+    textHome[i3 + 2] = (Math.random() - 0.5) * 0.32;
 
     modelHome[i3] = src.pos[i3];
     modelHome[i3 + 1] = src.pos[i3 + 1];
     modelHome[i3 + 2] = src.pos[i3 + 2];
 
-    // fly-in origin: point on a large surrounding sphere
-    const rA = 9 + Math.random() * 9;
+    // fly-in origin: point on a surrounding sphere, kept in front of the camera
+    // (z <= ~4 vs camera z=10) — splats that spawn at the near plane project to
+    // screen-filling blobs and read as static noise.
+    const rA = 7 + Math.random() * 8;
     const thA = Math.random() * Math.PI * 2;
     const phA = Math.acos(2 * Math.random() - 1);
     scatterA[i3] = Math.sin(phA) * Math.cos(thA) * rA;
-    scatterA[i3 + 1] = Math.sin(phA) * Math.sin(thA) * rA * 0.7;
-    scatterA[i3 + 2] = Math.cos(phA) * rA - 4;
+    scatterA[i3 + 1] = Math.sin(phA) * Math.sin(thA) * rA * 0.75;
+    scatterA[i3 + 2] = Math.cos(phA) * rA * 0.65 - 6;
 
     // explosion target: outward from the model centre + depth spread
     const mx = modelHome[i3];
@@ -255,15 +275,16 @@ function buildSplatData(text: string, src: ModelSource): SplatData {
 
     // staggers: assemble left->right, morph + blast ripple randomly
     const nx = textHome[i3] / worldW + 0.5;
-    delayForm[k] = Math.min(0.08, Math.max(0, nx * 0.07 + Math.random() * 0.02));
+    delayForm[k] = Math.min(MAX_FORM_DELAY, Math.max(0, nx * 0.07 + Math.random() * 0.02));
     delayMorph[k] = Math.random() * 0.08;
     delayBlast[k] = Math.random() * 0.12;
 
-    // text colour: brand palette
+    // text colour: ice white, steel shadow, rare cyan glint
     const rc = Math.random();
-    const tc = rc < 0.7 ? cAccent : rc < 0.92 ? cTeal : cWhite;
+    const tc = rc < 0.78 ? cIce : rc < 0.92 ? cSteel : cCyan;
 
-    // model colour: photoreal from the capture, else a brand height gradient
+    // model colour: photoreal from the capture (graded cool in the shader),
+    // else a steel height gradient for the bare CAD cloud
     let mr: number;
     let mg: number;
     let mb: number;
@@ -272,8 +293,8 @@ function buildSplatData(text: string, src: ModelSource): SplatData {
       mg = src.color[i3 + 1];
       mb = src.color[i3 + 2];
     } else if (maxY > minY) {
-      tmp.copy(cAccent).lerp(cTeal, (modelHome[i3 + 1] - minY) / (maxY - minY));
-      if (Math.random() < 0.1) tmp.copy(cWhite);
+      tmp.copy(cDeep).lerp(cIce, (modelHome[i3 + 1] - minY) / (maxY - minY));
+      if (Math.random() < 0.06) tmp.copy(cCyan);
       mr = tmp.r;
       mg = tmp.g;
       mb = tmp.b;
@@ -359,6 +380,7 @@ uniform vec2 uFocal;
 uniform vec2 uViewport;
 uniform float uTextDot;
 uniform float uTextAlpha;
+uniform float uGrade; // 1 => photoreal capture: pull its colours toward the site's cool palette
 
 out vec4 vColor;
 out vec2 vQuad;
@@ -372,6 +394,14 @@ float clamp01(float t) { return clamp(t, 0.0, 1.0); }
 float easeOutCubic(float t) { float u = 1.0 - t; return 1.0 - u * u * u; }
 float easeInCubic(float t) { return t * t * t; }
 float smoothstep01(float t) { return t * t * (3.0 - 2.0 * t); }
+
+// Luminance-preserving cool grade: desaturate, shift toward steel blue, lift.
+vec3 gradeCool(vec3 c) {
+  float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
+  vec3 d = mix(c, vec3(l), 0.35);
+  d *= vec3(0.88, 1.02, 1.16);
+  return clamp(d * 1.05 + 0.02, 0.0, 1.0);
+}
 
 mat3 quatToMat(vec4 q) {
   float x = q.x, y = q.y, z = q.z, w = q.w;
@@ -393,7 +423,7 @@ void main() {
   vec4 t6 = fetch(i, 6); // scale
   vec4 t7 = fetch(i, 7); // quat xyzw
 
-  float a = easeOutCubic(clamp01((uProgress - t0.w) / ${f(ASSEMBLE_END)}));
+  float a = easeOutCubic(clamp01((uProgress - t0.w) / ${f(ASSEMBLE_WINDOW)}));
   float m = smoothstep01(clamp01((uProgress - ${f(MORPH_START)} - t1.w) / ${f(MORPH_END - MORPH_START)}));
   float b = easeInCubic(clamp01((uProgress - ${f(BLAST_START)} - t2.w) / ${f(1 - BLAST_START)}));
 
@@ -401,7 +431,15 @@ void main() {
   vec3 formed = mix(base, t2.xyz, m);
   vec3 center = mix(formed, t3.xyz, b);
 
-  vColor = vec4(mix(t4.rgb, t5.rgb, m), mix(uTextAlpha, t3.w, m));
+  // In-flight splats stay faint dust and brighten as they seat into the word;
+  // the explosion dissolves to black instead of ending on a noise field.
+  float dust = mix(0.05, 1.0, a);
+  float fade = 1.0 - 0.9 * b;
+  vec3 modelCol = mix(t5.rgb, gradeCool(t5.rgb), uGrade);
+  vColor = vec4(
+    mix(t4.rgb, modelCol, m),
+    mix(uTextAlpha * dust, t3.w, m) * fade
+  );
 
   // text particles are isotropic dots that bloom into the real gaussian
   vec3 scale = mix(vec3(uTextDot), t6.xyz, m);
@@ -494,7 +532,7 @@ function depthSort(
 
   for (let k = 0; k < n; k++) {
     const i3 = k * 3;
-    const a = easeOutCubic(clamp01((p - data.delayForm[k]) / ASSEMBLE_END));
+    const a = easeOutCubic(clamp01((p - data.delayForm[k]) / ASSEMBLE_WINDOW));
     const m = smoothstep(
       clamp01((p - MORPH_START - data.delayMorph[k]) / (MORPH_END - MORPH_START))
     );
@@ -527,12 +565,28 @@ function depthSort(
   for (let k = 0; k < n; k++) order[counts[buckets[k]]++] = k;
 }
 
-function SplatCloud({ text, progress }: { text: string; progress: number }) {
+function SplatCloud({
+  text,
+  progress,
+  onReady,
+}: {
+  text: string;
+  progress: number;
+  onReady?: () => void;
+}) {
   const groupRef = useRef<THREE.Group>(null);
   const meshRef = useRef<THREE.Mesh>(null);
   const smooth = useRef(0);
+  const intro = useRef(0); // time-driven assembly, plays once after the data lands
+  const reducedMotion = useRef(false);
   const [src, setSrc] = useState<ModelSource | null>(null);
   const { size, camera } = useThree();
+
+  useEffect(() => {
+    reducedMotion.current =
+      typeof window !== 'undefined' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -542,6 +596,13 @@ function SplatCloud({ text, progress }: { text: string; progress: number }) {
         : MAX_SPLATS_DESKTOP;
 
     (async () => {
+      // The word is rasterised in the display font — wait for it so the first
+      // build doesn't sample a fallback face.
+      try {
+        await document.fonts?.ready;
+      } catch {
+        /* older browsers: sample whatever is available */
+      }
       // real gaussians first; fall back to the bare point cloud (STL path)
       try {
         const r = await fetch(SPLAT_URL);
@@ -571,6 +632,10 @@ function SplatCloud({ text, progress }: { text: string; progress: number }) {
 
   const data = useMemo(() => (src ? buildSplatData(text, src) : null), [text, src]);
 
+  useEffect(() => {
+    if (data) onReady?.();
+  }, [data, onReady]);
+
   const geometry = useMemo(() => {
     if (!data) return null;
     const g = new THREE.InstancedBufferGeometry();
@@ -592,7 +657,7 @@ function SplatCloud({ text, progress }: { text: string; progress: number }) {
   }, [data]);
 
   const material = useMemo(() => {
-    if (!data) return null;
+    if (!data || !src) return null;
     return new THREE.RawShaderMaterial({
       glslVersion: THREE.GLSL3,
       uniforms: {
@@ -601,8 +666,9 @@ function SplatCloud({ text, progress }: { text: string; progress: number }) {
         uProgress: { value: 0 },
         uFocal: { value: new THREE.Vector2(1000, 1000) },
         uViewport: { value: new THREE.Vector2(1, 1) },
-        uTextDot: { value: 0.008 },
-        uTextAlpha: { value: 0.9 },
+        uTextDot: { value: 0.0065 },
+        uTextAlpha: { value: 0.68 },
+        uGrade: { value: src.photoreal ? 1 : 0 },
       },
       vertexShader: SPLAT_VERT,
       fragmentShader: SPLAT_FRAG,
@@ -622,7 +688,7 @@ function SplatCloud({ text, progress }: { text: string; progress: number }) {
       blendSrcAlpha: THREE.OneFactor,
       blendDstAlpha: THREE.OneMinusSrcAlphaFactor,
     });
-  }, [data]);
+  }, [data, src]);
 
   // Scratch for the sort. Sized inside useFrame rather than in an effect: passive
   // effects can be deferred past the next frame, and a zero-length scratch would
@@ -644,13 +710,21 @@ function SplatCloud({ text, progress }: { text: string; progress: number }) {
     };
   }, [geometry, material, data]);
 
-  useFrame(() => {
+  useFrame((_state, delta) => {
     const grp = groupRef.current;
     const mesh = meshRef.current;
     if (!grp || !mesh || !data || !material) return;
 
+    // Entrance: advance the assembly beat on the clock (capped delta — a
+    // backgrounded tab must not fast-forward it), then let scroll drive the rest
+    // of the timeline. Reduced motion skips straight to the formed word.
+    intro.current = reducedMotion.current
+      ? 1
+      : Math.min(1, intro.current + Math.min(delta, 0.05) / INTRO_SECONDS);
     smooth.current = lerp(smooth.current, progress, 0.08);
-    const p = smooth.current;
+    const p =
+      ASSEMBLE_END * easeOutCubic(intro.current) +
+      smooth.current * (1 - ASSEMBLE_END);
 
     material.uniforms.uProgress.value = p;
     const cam = camera as THREE.PerspectiveCamera;
@@ -717,12 +791,13 @@ function CameraRig({ progress }: { progress: number }) {
   return null;
 }
 
+// Sparse ambient dust for depth — barely-there ice motes, not confetti.
 function BackgroundParticles({ progress }: { progress: number }) {
   const pointsRef = useRef<THREE.Points>(null);
 
   const positions = useMemo(() => {
-    const arr = new Float32Array(200 * 3);
-    for (let i = 0; i < 200; i++) {
+    const arr = new Float32Array(160 * 3);
+    for (let i = 0; i < 160; i++) {
       arr[i * 3] = (Math.random() - 0.5) * 16;
       arr[i * 3 + 1] = (Math.random() - 0.5) * 16;
       arr[i * 3 + 2] = (Math.random() - 0.5) * 16 - 4;
@@ -734,7 +809,7 @@ function BackgroundParticles({ progress }: { progress: number }) {
     if (pointsRef.current) {
       pointsRef.current.rotation.y += 0.0004;
       const mat = pointsRef.current.material as THREE.PointsMaterial;
-      mat.opacity = lerp(0.12, 0.35, progress);
+      mat.opacity = lerp(0.07, 0.2, progress);
     }
   });
 
@@ -743,15 +818,23 @@ function BackgroundParticles({ progress }: { progress: number }) {
       <bufferGeometry>
         <bufferAttribute attach="attributes-position" args={[positions, 3]} />
       </bufferGeometry>
-      <pointsMaterial size={0.025} color="#e94560" transparent opacity={0.12} sizeAttenuation />
+      <pointsMaterial size={0.02} color="#7fb4d8" transparent opacity={0.07} sizeAttenuation />
     </points>
   );
 }
 
-function Scene({ progress, text }: { progress: number; text: string }) {
+function Scene({
+  progress,
+  text,
+  onReady,
+}: {
+  progress: number;
+  text: string;
+  onReady?: () => void;
+}) {
   return (
     <>
-      <SplatCloud text={text} progress={progress} />
+      <SplatCloud text={text} progress={progress} onReady={onReady} />
       <BackgroundParticles progress={progress} />
       <CameraRig progress={progress} />
     </>
@@ -762,12 +845,20 @@ export default function ScrollScene({
   hero,
   stages,
 }: {
-  hero: { title: string; subtitle: string; scrollHint: string };
+  hero: {
+    title: string;
+    eyebrow: string;
+    subtitle: string;
+    scrollHint: string;
+    loading: string;
+  };
   stages: { title: string; text: string }[];
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [progress, setProgress] = useState(0);
   const [mounted, setMounted] = useState(false);
+  const [ready, setReady] = useState(false);
+  const handleReady = useCallback(() => setReady(true), []);
 
   useEffect(() => {
     setMounted(true);
@@ -796,31 +887,68 @@ export default function ScrollScene({
   );
 
   if (!mounted) {
-    return <div className="h-[500vh] bg-gray-950" />;
+    return <div className="h-[500vh] bg-ink" />;
   }
 
   return (
-    <div ref={containerRef} className="relative h-[500vh] bg-gray-950">
+    <div ref={containerRef} className="relative h-[500vh] bg-ink">
       {/* Sticky canvas */}
       <div className="sticky top-0 h-screen w-full overflow-hidden">
         <Canvas camera={{ position: [0, 0, 10], fov: 50 }}>
-          <Scene progress={progress} text={hero.title} />
+          <Scene progress={progress} text={hero.title} onReady={handleReady} />
         </Canvas>
+
+        {/* Vignette + edge fades: focus the cloud, hand off cleanly to the page */}
+        <div
+          className="pointer-events-none absolute inset-0"
+          style={{
+            background:
+              'radial-gradient(120% 90% at 50% 42%, transparent 42%, rgba(2, 4, 9, 0.78) 100%)',
+          }}
+        />
+        <div className="pointer-events-none absolute inset-x-0 top-0 h-28 bg-gradient-to-b from-ink/90 to-transparent" />
+        <div className="pointer-events-none absolute inset-x-0 bottom-0 h-32 bg-gradient-to-t from-ink to-transparent" />
 
         {/* Accessible heading — the particle word is not readable to screen readers */}
         <h1 className="sr-only">{hero.title}</h1>
 
-        {/* Hero overlay — subtitle + scroll hint, fade as you scroll */}
+        {/* Loading shimmer while the splat binary streams in */}
+        {!ready && (
+          <div className="absolute inset-0 grid place-items-center">
+            <div className="flex flex-col items-center gap-5">
+              <div className="h-px w-32 bg-white/10 overflow-hidden">
+                <div className="h-full w-full bg-accent/80 animate-pulse-soft" />
+              </div>
+              <p className="font-mono text-[11px] tracking-[0.35em] uppercase text-steel-dim animate-pulse-soft">
+                {hero.loading}
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* Hero overlay — eyebrow + subtitle + scroll cue, fade as you scroll */}
         <div
-          className="absolute inset-0 flex flex-col items-center justify-end pb-24 pointer-events-none"
+          className="absolute inset-0 flex flex-col items-center justify-end pb-16 md:pb-20 pointer-events-none"
           style={{ opacity: heroOpacity }}
         >
-          <p className="text-xl md:text-2xl text-gray-300 mb-8 text-center px-4">
-            {hero.subtitle}
-          </p>
-          <p className="text-sm text-gray-500 animate-bounce">
-            &#8595; {hero.scrollHint}
-          </p>
+          <div className={ready ? 'animate-fade-up [animation-delay:600ms]' : 'opacity-0'}>
+            <p className="font-mono text-[11px] md:text-xs tracking-[0.4em] uppercase text-accent/80 text-center mb-4">
+              {hero.eyebrow}
+            </p>
+            <p className="font-display text-lg md:text-2xl text-steel-light/90 text-center px-6">
+              {hero.subtitle}
+            </p>
+          </div>
+          <div
+            className={`mt-10 flex flex-col items-center gap-3 ${
+              ready ? 'animate-fade-up [animation-delay:1200ms]' : 'opacity-0'
+            }`}
+          >
+            <span className="font-mono text-[10px] tracking-[0.35em] uppercase text-steel-dim">
+              {hero.scrollHint}
+            </span>
+            <span className="block h-10 w-px bg-gradient-to-b from-accent/70 to-transparent animate-scroll-line" />
+          </div>
         </div>
 
         {/* Stage text overlay — appears as the model tears apart */}
@@ -828,8 +956,8 @@ export default function ScrollScene({
           className="absolute inset-0 flex items-center pointer-events-none"
           style={{ opacity: progress > 0.7 ? 1 : 0, transition: 'opacity 0.5s' }}
         >
-          <div className="max-w-7xl mx-auto px-4 w-full">
-            <div className="max-w-md">
+          <div className="max-w-7xl mx-auto px-6 lg:px-8 w-full">
+            <div className="relative max-w-md">
               {stages.map((stage, i) => (
                 <div
                   key={i}
@@ -841,22 +969,33 @@ export default function ScrollScene({
                         : 'opacity-0 translate-y-8'
                   }`}
                 >
-                  <h3 className="text-3xl md:text-4xl font-bold text-white mb-4">
+                  <p className="font-mono text-xs tracking-[0.35em] text-accent mb-5">
+                    {String(i + 1).padStart(2, '0')} / {String(stages.length).padStart(2, '0')}
+                  </p>
+                  <h3 className="font-display text-3xl md:text-5xl font-semibold text-white tracking-tight mb-5">
                     {stage.title}
                   </h3>
-                  <p className="text-gray-400 text-lg">{stage.text}</p>
+                  <p className="text-steel-mid text-base md:text-lg leading-relaxed border-l border-white/15 pl-5">
+                    {stage.text}
+                  </p>
                 </div>
               ))}
             </div>
           </div>
         </div>
 
-        {/* Progress bar */}
-        <div className="absolute bottom-8 left-1/2 -translate-x-1/2 w-32 h-1 bg-white/10 rounded-full overflow-hidden">
-          <div
-            className="h-full bg-accent rounded-full transition-all duration-100"
-            style={{ width: `${progress * 100}%` }}
-          />
+        {/* Scroll progress rail */}
+        <div className="absolute right-6 lg:right-8 top-1/2 -translate-y-1/2 hidden md:flex flex-col items-center gap-3">
+          <span className="font-mono text-[10px] text-steel-dim tabular-nums">
+            {String(Math.round(progress * 100)).padStart(3, '0')}
+          </span>
+          <div className="relative h-44 w-px bg-white/10 overflow-hidden">
+            <div
+              className="absolute top-0 left-0 w-full bg-accent shadow-[0_0_12px_rgba(56,223,255,0.9)]"
+              style={{ height: `${progress * 100}%` }}
+            />
+          </div>
+          <span className="font-mono text-[10px] text-steel-dim tabular-nums">100</span>
         </div>
       </div>
     </div>
