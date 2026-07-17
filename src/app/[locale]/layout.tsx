@@ -1,7 +1,7 @@
 import { NextIntlClientProvider } from 'next-intl';
 import { getMessages } from 'next-intl/server';
 import { notFound } from 'next/navigation';
-import { Inter, Anton, IBM_Plex_Mono } from 'next/font/google';
+import { Inter, Anton, IBM_Plex_Mono, Noto_Sans_SC } from 'next/font/google';
 import { routing } from '@/i18n/routing';
 import Header from '@/components/layout/Header';
 import Footer from '@/components/layout/Footer';
@@ -22,6 +22,16 @@ const anton = Anton({
   subsets: ['latin'],
   variable: '--font-anton',
   display: 'swap',
+});
+
+// Black-weight hanzi for the particle hero word. Google slices CJK faces by
+// unicode-range, so a visitor only downloads the small slices containing the
+// glyphs actually rendered (the hero's 制造) — not the whole face.
+const notoHei = Noto_Sans_SC({
+  weight: '900',
+  variable: '--font-hei',
+  display: 'swap',
+  preload: false,
 });
 
 const plexMono = IBM_Plex_Mono({
@@ -53,7 +63,7 @@ export default async function LocaleLayout({
     <html
       lang={locale}
       suppressHydrationWarning
-      className={`${inter.variable} ${anton.variable} ${plexMono.variable}`}
+      className={`${inter.variable} ${anton.variable} ${plexMono.variable} ${notoHei.variable}`}
     >
       <body className="min-h-screen flex flex-col bg-void text-smoke font-sans">
         <NextIntlClientProvider messages={messages}>

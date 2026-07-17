@@ -55,6 +55,25 @@ function smoothstep(t: number) {
   return t * t * (3 - 2 * t);
 }
 
+// next/font registers its faces under mangled family names ('__Anton_abc123'),
+// so a canvas asking for "Anton" silently falls back to Impact/system sans and
+// the browser fake-bolds it into mush. Resolve the real family list by probing
+// a computed style built from the CSS variables the fonts are exposed through.
+function resolveDisplayFamilies() {
+  const fallback = '"Heiti SC", "PingFang SC", "Microsoft YaHei", Impact, sans-serif';
+  if (typeof document === 'undefined') return fallback;
+  const probe = document.createElement('span');
+  probe.style.fontFamily = 'var(--font-anton), var(--font-hei)';
+  document.body.appendChild(probe);
+  const fam = getComputedStyle(probe).fontFamily;
+  probe.remove();
+  return fam ? `${fam}, ${fallback}` : fallback;
+}
+
+// Sampling lattice pitch, px. buildSplatData spreads the splats stacked on one
+// sampled pixel back across this cell, so the lattice never shows.
+const SAMPLE_STEP = 4;
+
 // Rasterize the title to an offscreen canvas and return its filled pixels.
 function sampleTextCoords(text: string) {
   const cw = 1200;
@@ -85,13 +104,22 @@ function sampleTextCoords(text: string) {
     lines = best;
   }
 
-  // The poster face is loaded by next/font; the caller waits on document.fonts
-  // before sampling, so the canvas can rasterise the real display face. CJK
-  // glyphs fall through to heavy system sans.
-  const font = (s: number) =>
-    `800 ${s}px "Anton", "Heiti SC", "PingFang SC", "Microsoft YaHei", Impact, sans-serif`;
+  // Weight 400 on purpose: Anton's single face is registered as 400, and the
+  // hanzi face is registered 900-only so nearest-match picks it up — asking for
+  // a heavier weight than a face owns makes the canvas synthesize a fake bold
+  // that clogs the counters. Tracking keeps particle letters from merging.
+  const families = resolveDisplayFamilies();
+  const font = (s: number) => `400 ${s}px ${families}`;
+  const track = (s: number) => {
+    try {
+      ctx.letterSpacing = `${Math.round(s * 0.05)}px`;
+    } catch {
+      /* older engines: no tracking, layout still works */
+    }
+  };
   let fontSize = 400;
   ctx.font = font(fontSize);
+  track(fontSize);
   let maxW = 1;
   for (const ln of lines) maxW = Math.max(maxW, ctx.measureText(ln).width);
   fontSize = Math.max(
@@ -103,6 +131,7 @@ function sampleTextCoords(text: string) {
   );
 
   ctx.font = font(fontSize);
+  track(fontSize);
   ctx.fillStyle = '#ffffff';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
@@ -111,10 +140,9 @@ function sampleTextCoords(text: string) {
   lines.forEach((ln, i) => ctx.fillText(ln, cw / 2, startY + i * lineH));
 
   const img = ctx.getImageData(0, 0, cw, ch).data;
-  const step = 4;
   const coords: number[] = [];
-  for (let y = 0; y < ch; y += step) {
-    for (let x = 0; x < cw; x += step) {
+  for (let y = 0; y < ch; y += SAMPLE_STEP) {
+    for (let x = 0; x < cw; x += SAMPLE_STEP) {
       if (img[(y * cw + x) * 4 + 3] > 128) coords.push(x, y);
     }
   }
@@ -241,14 +269,18 @@ function buildSplatData(text: string, src: ModelSource): SplatData {
   for (let k = 0; k < count; k++) {
     const i3 = k * 3;
 
-    // text home: spread the splats evenly across the rasterised text pixels
+    // text home: spread the splats evenly across the rasterised text pixels.
+    // ~10+ splats share each sampled pixel, so scatter them across the sampling
+    // cell — without the jitter they stack into one fat dot per lattice point
+    // and the word reads as chunky mush instead of fine grain.
+    const cell = (worldW * SAMPLE_STEP) / cw;
     const ti = Math.floor((k * textCount) / count) % textCount;
     const tx = coords[ti * 2] ?? cw / 2;
     const ty = coords[ti * 2 + 1] ?? ch / 2;
-    textHome[i3] = (tx / cw - 0.5) * worldW;
-    textHome[i3 + 1] = -(ty / ch - 0.5) * worldH;
+    textHome[i3] = (tx / cw - 0.5) * worldW + (Math.random() - 0.5) * cell;
+    textHome[i3 + 1] = -(ty / ch - 0.5) * worldH + (Math.random() - 0.5) * cell;
     // thin slab: a deep z-jitter blurs the word's edges
-    textHome[i3 + 2] = (Math.random() - 0.5) * 0.32;
+    textHome[i3 + 2] = (Math.random() - 0.5) * 0.18;
 
     modelHome[i3] = src.pos[i3];
     modelHome[i3 + 1] = src.pos[i3 + 1];
@@ -279,9 +311,10 @@ function buildSplatData(text: string, src: ModelSource): SplatData {
     delayMorph[k] = Math.random() * 0.08;
     delayBlast[k] = Math.random() * 0.12;
 
-    // text colour: smoke body, gray shadow, rare acid strikes
+    // text colour: smoke body, a little gray shadow, rare acid strikes. Gray
+    // kept sparse — too much of it reads as dark mottling inside the letters.
     const rc = Math.random();
-    const tc = rc < 0.82 ? cSmoke : rc < 0.94 ? cGray : cAcid;
+    const tc = rc < 0.9 ? cSmoke : rc < 0.955 ? cGray : cAcid;
 
     // model colour: photoreal from the capture (graded high-contrast B&W in the
     // shader), else a charcoal->smoke height gradient for the bare CAD cloud
@@ -622,12 +655,15 @@ function SplatCloud({
         : MAX_SPLATS_DESKTOP;
 
     (async () => {
-      // The word is rasterised in the display font — request the faces
-      // explicitly (fonts.ready alone only covers faces already used in the
-      // DOM) so the first build doesn't sample a fallback serif.
+      // The word is rasterised in the display faces — request them explicitly
+      // (fonts.ready alone only covers faces already used in the DOM), using
+      // the resolved next/font family names and the actual glyphs so the
+      // subset hanzi face downloads before the first sample.
       try {
+        const families = resolveDisplayFamilies();
         await Promise.allSettled([
-          document.fonts.load('400 200px "Anton"'),
+          document.fonts.load(`400 200px ${families}`, text.toUpperCase()),
+          document.fonts.load(`900 200px ${families}`, text.toUpperCase()),
           document.fonts.ready,
         ]);
       } catch {
@@ -696,8 +732,8 @@ function SplatCloud({
         uProgress: { value: 0 },
         uFocal: { value: new THREE.Vector2(1000, 1000) },
         uViewport: { value: new THREE.Vector2(1, 1) },
-        uTextDot: { value: 0.0065 },
-        uTextAlpha: { value: 0.68 },
+        uTextDot: { value: 0.005 },
+        uTextAlpha: { value: 0.82 },
         uGrade: { value: src.photoreal ? 1 : 0 },
         uMouse: { value: new THREE.Vector2(99, 99) },
         uTime: { value: 0 },
