@@ -38,12 +38,33 @@ export default function Cursor() {
       hovering = !!(e.target as Element | null)?.closest?.('a, button');
     };
 
+    // Half-pixel quantised, and only written on change: an unconditional write
+    // every frame invalidates the layer even when nothing moved, and WebKit
+    // pays real compositor time for every invalidation above the hero canvas.
+    let lx = -1;
+    let ly = -1;
+    let lrx = -1;
+    let lry = -1;
+    let lHov = false;
     const loop = () => {
       rx += (mx - rx) * 0.16;
       ry += (my - ry) * 0.16;
-      dot.style.transform = `translate(${mx}px, ${my}px)`;
-      ring.style.transform = `translate(${rx}px, ${ry}px) scale(${hovering ? 1.9 : 1})`;
-      ring.style.borderColor = hovering ? '#c6ff00' : 'rgba(245,245,243,0.35)';
+      const qrx = Math.round(rx * 2) / 2;
+      const qry = Math.round(ry * 2) / 2;
+      if (mx !== lx || my !== ly) {
+        dot.style.transform = `translate(${mx}px, ${my}px)`;
+        lx = mx;
+        ly = my;
+      }
+      if (qrx !== lrx || qry !== lry || hovering !== lHov) {
+        ring.style.transform = `translate(${qrx}px, ${qry}px) scale(${hovering ? 1.9 : 1})`;
+        lrx = qrx;
+        lry = qry;
+      }
+      if (hovering !== lHov) {
+        ring.style.borderColor = hovering ? '#c6ff00' : 'rgba(245,245,243,0.35)';
+        lHov = hovering;
+      }
       raf = requestAnimationFrame(loop);
     };
 

@@ -413,6 +413,7 @@ uniform vec2 uFocal;
 uniform vec2 uViewport;
 uniform float uTextDot;
 uniform float uTextAlpha;
+uniform float uMaxAxis; // screen-px cap on the projected ellipse — bounds worst-case fill
 uniform float uGrade; // 1 => photoreal capture: grade it into the site's monochrome
 uniform vec2 uMouse;  // cursor on the z=0 plane, world units
 uniform float uTime;
@@ -529,8 +530,8 @@ void main() {
   }
 
   vec2 dv = normalize(vec2(cov[0][1], l1 - cov[0][0]) + vec2(1e-6, 0.0));
-  vec2 majorAxis = min(sqrt(2.0 * l1), 1024.0) * dv;
-  vec2 minorAxis = min(sqrt(2.0 * l2), 1024.0) * vec2(dv.y, -dv.x);
+  vec2 majorAxis = min(sqrt(2.0 * l1), uMaxAxis) * dv;
+  vec2 minorAxis = min(sqrt(2.0 * l2), uMaxAxis) * vec2(dv.y, -dv.x);
 
   vQuad = position.xy;
   // axes are in pixels; NDC spans 2 across the viewport, hence the 2.0
@@ -570,10 +571,10 @@ function depthSort(
   order: Float32Array,
   depths: Float32Array,
   buckets: Uint16Array,
-  counts: Uint32Array
+  counts: Uint32Array,
+  n: number // sort only the first n splats — the adaptive governor may draw fewer
 ) {
   const e = mv.elements;
-  const n = data.count;
   let dmin = Infinity;
   let dmax = -Infinity;
 
@@ -628,6 +629,18 @@ function SplatCloud({
   const reducedMotion = useRef(false);
   const [src, setSrc] = useState<ModelSource | null>(null);
   const { size, camera } = useThree();
+  const setDpr = useThree((s) => s.setDpr);
+  const active = useRef(0); // splats currently drawn (governor may trim)
+  const gov = useRef<Governor>({
+    ema: 16.7,
+    bad: 0,
+    good: 0,
+    cooldown: 0,
+    level: 0,
+    dpr0: 0,
+    sortEvery: 1,
+    frame: 0,
+  });
 
   useEffect(() => {
     reducedMotion.current =
@@ -705,10 +718,12 @@ function SplatCloud({
   const geometry = useMemo(() => {
     if (!data) return null;
     const g = new THREE.InstancedBufferGeometry();
+    // ±1.7 sigma, not ±2: the gaussian is at 0.3% by the corners, and the
+    // smaller quad rasterises ~28% fewer fragments — pure fill-rate savings.
     g.setAttribute(
       'position',
       new THREE.BufferAttribute(
-        new Float32Array([-2, -2, 0, 2, -2, 0, 2, 2, 0, -2, 2, 0]),
+        new Float32Array([-1.7, -1.7, 0, 1.7, -1.7, 0, 1.7, 1.7, 0, -1.7, 1.7, 0]),
         3
       )
     );
@@ -734,6 +749,10 @@ function SplatCloud({
         uViewport: { value: new THREE.Vector2(1, 1) },
         uTextDot: { value: 0.005 },
         uTextAlpha: { value: 0.82 },
+        uMaxAxis: {
+          value:
+            typeof window !== 'undefined' && window.innerWidth < 820 ? 120 : 220,
+        },
         uGrade: { value: src.photoreal ? 1 : 0 },
         uMouse: { value: new THREE.Vector2(99, 99) },
         uTime: { value: 0 },
@@ -824,24 +843,71 @@ function SplatCloud({
     grp.rotation.x = -0.35 * rf;
 
     // Re-sort only when the ordering can actually have changed: the splats moved
-    // (progress) or the camera did. Idle frames reuse the last order.
+    // (progress) or the camera did. Idle frames reuse the last order. Degraded
+    // devices sort every other frame — one frame of stale order is invisible at
+    // these alphas.
     const st = sortRef.current;
+    const g = gov.current;
+    g.frame++;
     if (st.buckets.length !== data.count) {
       st.buckets = new Uint16Array(data.count);
       st.depths = new Float32Array(data.count);
       st.lastP = -1;
+      active.current = data.count;
     }
+    (mesh.geometry as THREE.InstancedBufferGeometry).instanceCount = active.current;
     const camKey = camera.position.x + camera.position.y * 7.1 + camera.position.z * 13.3;
-    if (Math.abs(p - st.lastP) > 0.0005 || Math.abs(camKey - st.camKey) > 0.02) {
+    if (
+      (Math.abs(p - st.lastP) > 0.0005 || Math.abs(camKey - st.camKey) > 0.02) &&
+      g.frame % g.sortEvery === 0
+    ) {
       grp.updateMatrixWorld();
       camera.updateMatrixWorld();
       st.mv.copy(camera.matrixWorld).invert().multiply(mesh.matrixWorld);
 
       const attr = mesh.geometry.getAttribute('iIndex') as THREE.InstancedBufferAttribute;
-      depthSort(data, p, st.mv, attr.array as Float32Array, st.depths, st.buckets, st.counts);
+      depthSort(
+        data,
+        p,
+        st.mv,
+        attr.array as Float32Array,
+        st.depths,
+        st.buckets,
+        st.counts,
+        active.current
+      );
       attr.needsUpdate = true;
       st.lastP = p;
       st.camKey = camKey;
+    }
+
+    // Quality governor: EMA over the real frame cadence, act with hysteresis.
+    // Skipped until the intro has played so load spikes don't trigger it.
+    if (intro.current >= 1) {
+      if (g.dpr0 === 0) g.dpr0 = state.viewport.dpr;
+      g.ema += (Math.min(delta * 1000, 100) - g.ema) * 0.08;
+      if (g.cooldown > 0) g.cooldown--;
+      let move = 0;
+      if (g.ema > GOV_SLOW_MS) {
+        g.good = 0;
+        if (++g.bad > 45 && g.cooldown === 0 && g.level < GOV_MAX_LEVEL) move = 1;
+      } else if (g.ema < GOV_FAST_MS) {
+        g.bad = 0;
+        if (++g.good > 240 && g.cooldown === 0 && g.level > 0) move = -1;
+      } else {
+        g.bad = 0;
+        g.good = 0;
+      }
+      if (move !== 0) {
+        g.level += move;
+        g.bad = 0;
+        g.good = 0;
+        g.cooldown = move > 0 ? 120 : 420;
+        g.sortEvery = g.level >= 2 ? 2 : 1;
+        active.current = Math.floor(data.count * GOV_COUNT[g.level]);
+        setDpr(Math.max(1, g.dpr0 * GOV_DPR[g.level]));
+        st.lastP = -1; // force a fresh sort at the new count
+      }
     }
   });
 
@@ -854,7 +920,29 @@ function SplatCloud({
   );
 }
 
-// Front-facing camera: gentle mid-scroll dolly + subtle mouse parallax.
+// Adaptive quality governor. The splat cloud is fill-rate-bound on weak GPUs
+// (Safari's WebGL runs this at a fraction of Chrome's throughput; phones have
+// a fraction of desktop fill). Rather than sniffing browsers, watch the real
+// frame cadence and walk a quality ladder: first render scale (dpr), then
+// splat density. Every animation beat stays identical — degradation is only
+// resolution and grain density. Recovers (with hysteresis) up to the initial
+// tier when the device turns out to have headroom.
+const GOV_DPR = [1, 0.85, 0.72, 0.72, 0.6];
+const GOV_COUNT = [1, 1, 1, 0.7, 0.5];
+const GOV_MAX_LEVEL = GOV_DPR.length - 1;
+const GOV_SLOW_MS = 26; // sustained above this (≈ <40fps) => degrade
+const GOV_FAST_MS = 12.5; // sustained below this => try recovering
+
+type Governor = {
+  ema: number;
+  bad: number;
+  good: number;
+  cooldown: number;
+  level: number;
+  dpr0: number;
+  sortEvery: number;
+  frame: number;
+};
 function CameraRig({ progress }: { progress: number }) {
   const { camera } = useThree();
   const smooth = useRef(0);
@@ -940,11 +1028,26 @@ export default function ScrollScene({
   const [progress, setProgress] = useState(0);
   const [mounted, setMounted] = useState(false);
   const [ready, setReady] = useState(false);
+  const [inView, setInView] = useState(true);
   const handleReady = useCallback(() => setReady(true), []);
 
   useEffect(() => {
     setMounted(true);
   }, []);
+
+  // The splat cloud is the most expensive thing on the page — stop its render
+  // loop entirely once the hero scrolls out of view, instead of burning GPU
+  // behind the DOM sections forever. Generous margin so it resumes (and
+  // re-sorts) before the canvas is back on screen.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el || typeof IntersectionObserver === 'undefined') return;
+    const io = new IntersectionObserver(([e]) => setInView(e.isIntersecting), {
+      rootMargin: '30% 0px 30% 0px',
+    });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [mounted]);
 
   useEffect(() => {
     const handleScroll = () => {
@@ -974,22 +1077,38 @@ export default function ScrollScene({
 
   return (
     <div ref={containerRef} className="relative h-[500vh] bg-void">
-      {/* Sticky canvas */}
+      {/* Sticky canvas. antialias off (soft gaussians can't alias, MSAA is pure
+          fill-rate cost), opaque canvas in the page background colour (saves
+          the compositor a full-screen blend), phones start at a lower render
+          scale — the governor inside handles the rest. */}
       <div className="sticky top-0 h-screen w-full overflow-hidden">
-        <Canvas camera={{ position: [0, 0, 10], fov: 50 }}>
+        <Canvas
+          camera={{ position: [0, 0, 10], fov: 50 }}
+          frameloop={inView ? 'always' : 'never'}
+          dpr={
+            typeof window !== 'undefined' && window.innerWidth < 820
+              ? [1, 1.75]
+              : [1, 2]
+          }
+          gl={{ antialias: false, alpha: false, powerPreference: 'high-performance' }}
+          onCreated={({ gl }) => gl.setClearColor('#050505', 1)}
+        >
           <Scene progress={progress} text={hero.title} onReady={handleReady} />
         </Canvas>
 
-        {/* Vignette + edge fades: focus the cloud, hand off cleanly to the page */}
+        {/* Vignette + edge fades in ONE element (stacked backgrounds): every div
+            layered over the canvas is another full-screen blend the compositor
+            pays on every canvas frame — WebKit in particular chokes on it */}
         <div
           className="pointer-events-none absolute inset-0"
           style={{
-            background:
+            background: [
+              'linear-gradient(to bottom, rgba(5,5,5,0.9), transparent 7rem)',
+              'linear-gradient(to top, rgba(5,5,5,1), transparent 8rem)',
               'radial-gradient(120% 90% at 50% 42%, transparent 42%, rgba(3, 3, 3, 0.8) 100%)',
+            ].join(', '),
           }}
         />
-        <div className="pointer-events-none absolute inset-x-0 top-0 h-28 bg-gradient-to-b from-void/90 to-transparent" />
-        <div className="pointer-events-none absolute inset-x-0 bottom-0 h-32 bg-gradient-to-t from-void to-transparent" />
 
         {/* Accessible heading — the particle word is not readable to screen readers */}
         <h1 className="sr-only">{hero.title}</h1>
