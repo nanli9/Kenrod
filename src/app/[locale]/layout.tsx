@@ -22,7 +22,10 @@ export default async function LocaleLayout({
   const messages = await getMessages();
 
   return (
-    <html lang={locale}>
+    // suppressHydrationWarning covers only this element's own attributes, not its
+    // descendants — it silences extension-injected attrs (Dark Reader et al.) on
+    // <html> without hiding real hydration bugs deeper in the tree.
+    <html lang={locale} suppressHydrationWarning>
       <body className="min-h-screen flex flex-col bg-white text-gray-900">
         <NextIntlClientProvider messages={messages}>
           <Header />
