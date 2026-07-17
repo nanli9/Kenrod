@@ -4,6 +4,19 @@ import { useEffect, useState } from 'react';
 import { useTranslations } from 'next-intl';
 import LanguageSwitcher from './LanguageSwitcher';
 
+// The 国友 chop — the only vermilion in the whole system.
+export function SealChop({ className = '' }: { className?: string }) {
+  return (
+    <span
+      aria-hidden
+      className={`inline-flex flex-col items-center justify-center w-[22px] h-[22px] rounded-[5px] bg-seal text-paper font-display font-bold text-[9px] leading-[1.05] select-none ${className}`}
+    >
+      <span>国</span>
+      <span>友</span>
+    </span>
+  );
+}
+
 export default function Header() {
   const t = useTranslations('nav');
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -36,10 +49,11 @@ export default function Header() {
   };
 
   return (
+    // Stays lacquer-dark over both dark and paper sections — a museum plaque.
     <header
-      className={`fixed top-0 z-50 w-full text-white transition-all duration-300 ${
+      className={`fixed top-0 z-50 w-full text-ivory transition-all duration-300 ${
         scrolled || mobileOpen
-          ? 'bg-ink/75 backdrop-blur-xl border-b border-white/[0.06]'
+          ? 'bg-lacquer/80 backdrop-blur-xl border-b border-brass/15'
           : 'bg-transparent border-b border-transparent'
       }`}
     >
@@ -48,14 +62,12 @@ export default function Header() {
           <a
             href="#"
             onClick={(e) => scrollTo(e, '#')}
-            className="flex items-baseline gap-2.5 group"
+            className="flex items-center gap-3 group"
           >
-            <span className="font-display text-lg font-bold tracking-[0.25em]">
+            <span className="font-display text-xl font-bold tracking-[0.18em]">
               KENROD
             </span>
-            <span className="font-mono text-[10px] text-steel-dim tracking-widest group-hover:text-accent/80 transition-colors">
-              国友®
-            </span>
+            <SealChop className="opacity-90 group-hover:opacity-100 transition-opacity" />
           </a>
 
           <nav className="hidden md:flex items-center gap-9">
@@ -64,9 +76,9 @@ export default function Header() {
                 key={item.href}
                 href={item.href}
                 onClick={(e) => scrollTo(e, item.href)}
-                className="group font-mono text-[11px] uppercase tracking-[0.25em] text-steel-mid hover:text-white transition-colors"
+                className="group font-mono text-[11px] uppercase tracking-[0.25em] text-bone hover:text-ivory transition-colors"
               >
-                <span className="text-accent/60 mr-1.5 group-hover:text-accent transition-colors">
+                <span className="text-brass/70 mr-1.5 group-hover:text-brass transition-colors">
                   {item.index}
                 </span>
                 {item.label}
@@ -79,13 +91,13 @@ export default function Header() {
             <a
               href="#contact"
               onClick={(e) => scrollTo(e, '#contact')}
-              className="hidden sm:inline-flex items-center h-8 px-4 bg-white text-ink text-xs font-medium tracking-wide rounded-full hover:bg-steel-light transition-colors"
+              className="hidden sm:inline-flex items-center h-8 px-4 bg-jade text-white text-xs font-medium tracking-wide rounded-full hover:bg-jade-bright hover:text-lacquer transition-colors"
             >
               {t('contact')}
             </a>
             <button
               onClick={() => setMobileOpen(!mobileOpen)}
-              className="md:hidden p-2 text-steel-mid hover:text-white"
+              className="md:hidden p-2 text-bone hover:text-ivory"
               aria-label="Toggle menu"
             >
               <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -101,16 +113,16 @@ export default function Header() {
       </div>
 
       {mobileOpen && (
-        <nav className="md:hidden border-t border-white/[0.06] bg-ink/95 backdrop-blur-xl">
+        <nav className="md:hidden border-t border-brass/15 bg-lacquer/95 backdrop-blur-xl">
           <div className="px-4 py-4 space-y-1">
             {navItems.map((item) => (
               <a
                 key={item.href}
                 href={item.href}
                 onClick={(e) => scrollTo(e, item.href)}
-                className="flex items-center gap-3 px-3 py-3 font-mono text-xs uppercase tracking-[0.25em] text-steel-mid hover:text-white hover:bg-white/5 transition-colors"
+                className="flex items-center gap-3 px-3 py-3 font-mono text-xs uppercase tracking-[0.25em] text-bone hover:text-ivory hover:bg-white/5 transition-colors"
               >
-                <span className="text-accent/60">{item.index}</span>
+                <span className="text-brass/70">{item.index}</span>
                 {item.label}
               </a>
             ))}

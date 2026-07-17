@@ -85,11 +85,11 @@ function sampleTextCoords(text: string) {
     lines = best;
   }
 
-  // Space Grotesk is loaded by next/font; the caller waits on document.fonts
-  // before sampling, so the canvas can use the real display face. CJK glyphs
-  // fall through to the system faces.
+  // The display serif is loaded by next/font; the caller waits on document.fonts
+  // before sampling, so the canvas can rasterise the real editorial face. CJK
+  // glyphs fall through to Noto Serif SC / system Song serifs.
   const font = (s: number) =>
-    `700 ${s}px "Space Grotesk", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif`;
+    `700 ${s}px "Fraunces", "Noto Serif SC", "Songti SC", Georgia, serif`;
   let fontSize = 400;
   ctx.font = font(fontSize);
   let maxW = 1;
@@ -227,12 +227,13 @@ function buildSplatData(text: string, src: ModelSource): SplatData {
     if (y > maxY) maxY = y;
   }
 
-  // Ice/steel particle palette — cool monochrome with a restrained cyan sparkle.
-  // (The old red/teal/cream brand mix read as noise against the dark backdrop.)
-  const cIce = new THREE.Color('#e9f2fc');
-  const cSteel = new THREE.Color('#9fb4cc');
-  const cCyan = new THREE.Color('#38dfff');
-  const cDeep = new THREE.Color('#22405f');
+  // Ivory/bone particle palette with rare jade and brass glints — the word
+  // reads as carved bone on lacquer, not confetti.
+  const cIvory = new THREE.Color('#f2ede0');
+  const cBone = new THREE.Color('#cec4ad');
+  const cJade = new THREE.Color('#3bc79d');
+  const cBrass = new THREE.Color('#c9a96b');
+  const cJadeDeep = new THREE.Color('#0b5c49');
   const tmp = new THREE.Color();
 
   const texH = Math.ceil((count * TEXELS_PER_SPLAT) / TEX_W);
@@ -279,12 +280,12 @@ function buildSplatData(text: string, src: ModelSource): SplatData {
     delayMorph[k] = Math.random() * 0.08;
     delayBlast[k] = Math.random() * 0.12;
 
-    // text colour: ice white, steel shadow, rare cyan glint
+    // text colour: ivory body, bone shadow, rare jade/brass glints
     const rc = Math.random();
-    const tc = rc < 0.78 ? cIce : rc < 0.92 ? cSteel : cCyan;
+    const tc = rc < 0.8 ? cIvory : rc < 0.92 ? cBone : rc < 0.97 ? cJade : cBrass;
 
-    // model colour: photoreal from the capture (graded cool in the shader),
-    // else a steel height gradient for the bare CAD cloud
+    // model colour: photoreal from the capture (graded warm in the shader),
+    // else a jade->ivory height gradient for the bare CAD cloud
     let mr: number;
     let mg: number;
     let mb: number;
@@ -293,8 +294,8 @@ function buildSplatData(text: string, src: ModelSource): SplatData {
       mg = src.color[i3 + 1];
       mb = src.color[i3 + 2];
     } else if (maxY > minY) {
-      tmp.copy(cDeep).lerp(cIce, (modelHome[i3 + 1] - minY) / (maxY - minY));
-      if (Math.random() < 0.06) tmp.copy(cCyan);
+      tmp.copy(cJadeDeep).lerp(cIvory, (modelHome[i3 + 1] - minY) / (maxY - minY));
+      if (Math.random() < 0.05) tmp.copy(cBrass);
       mr = tmp.r;
       mg = tmp.g;
       mb = tmp.b;
@@ -380,7 +381,7 @@ uniform vec2 uFocal;
 uniform vec2 uViewport;
 uniform float uTextDot;
 uniform float uTextAlpha;
-uniform float uGrade; // 1 => photoreal capture: pull its colours toward the site's cool palette
+uniform float uGrade; // 1 => photoreal capture: pull its colours toward the site's warm palette
 
 out vec4 vColor;
 out vec2 vQuad;
@@ -395,11 +396,11 @@ float easeOutCubic(float t) { float u = 1.0 - t; return 1.0 - u * u * u; }
 float easeInCubic(float t) { return t * t * t; }
 float smoothstep01(float t) { return t * t * (3.0 - 2.0 * t); }
 
-// Luminance-preserving cool grade: desaturate, shift toward steel blue, lift.
-vec3 gradeCool(vec3 c) {
+// Luminance-preserving warm grade: desaturate, shift toward candlelit silver, lift.
+vec3 gradeWarm(vec3 c) {
   float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
-  vec3 d = mix(c, vec3(l), 0.35);
-  d *= vec3(0.88, 1.02, 1.16);
+  vec3 d = mix(c, vec3(l), 0.32);
+  d *= vec3(1.07, 1.0, 0.88);
   return clamp(d * 1.05 + 0.02, 0.0, 1.0);
 }
 
@@ -435,7 +436,7 @@ void main() {
   // the explosion dissolves to black instead of ending on a noise field.
   float dust = mix(0.05, 1.0, a);
   float fade = 1.0 - 0.9 * b;
-  vec3 modelCol = mix(t5.rgb, gradeCool(t5.rgb), uGrade);
+  vec3 modelCol = mix(t5.rgb, gradeWarm(t5.rgb), uGrade);
   vColor = vec4(
     mix(t4.rgb, modelCol, m),
     mix(uTextAlpha * dust, t3.w, m) * fade
@@ -596,10 +597,15 @@ function SplatCloud({
         : MAX_SPLATS_DESKTOP;
 
     (async () => {
-      // The word is rasterised in the display font — wait for it so the first
-      // build doesn't sample a fallback face.
+      // The word is rasterised in the display font — request the faces
+      // explicitly (fonts.ready alone only covers faces already used in the
+      // DOM) so the first build doesn't sample a fallback serif.
       try {
-        await document.fonts?.ready;
+        await Promise.allSettled([
+          document.fonts.load('700 200px "Fraunces"'),
+          document.fonts.load('700 200px "Noto Serif SC"'),
+          document.fonts.ready,
+        ]);
       } catch {
         /* older browsers: sample whatever is available */
       }
@@ -818,7 +824,7 @@ function BackgroundParticles({ progress }: { progress: number }) {
       <bufferGeometry>
         <bufferAttribute attach="attributes-position" args={[positions, 3]} />
       </bufferGeometry>
-      <pointsMaterial size={0.02} color="#7fb4d8" transparent opacity={0.07} sizeAttenuation />
+      <pointsMaterial size={0.02} color="#bfb49a" transparent opacity={0.07} sizeAttenuation />
     </points>
   );
 }
@@ -887,11 +893,11 @@ export default function ScrollScene({
   );
 
   if (!mounted) {
-    return <div className="h-[500vh] bg-ink" />;
+    return <div className="h-[500vh] bg-lacquer" />;
   }
 
   return (
-    <div ref={containerRef} className="relative h-[500vh] bg-ink">
+    <div ref={containerRef} className="relative h-[500vh] bg-lacquer">
       {/* Sticky canvas */}
       <div className="sticky top-0 h-screen w-full overflow-hidden">
         <Canvas camera={{ position: [0, 0, 10], fov: 50 }}>
@@ -903,11 +909,11 @@ export default function ScrollScene({
           className="pointer-events-none absolute inset-0"
           style={{
             background:
-              'radial-gradient(120% 90% at 50% 42%, transparent 42%, rgba(2, 4, 9, 0.78) 100%)',
+              'radial-gradient(120% 90% at 50% 42%, transparent 42%, rgba(8, 7, 5, 0.78) 100%)',
           }}
         />
-        <div className="pointer-events-none absolute inset-x-0 top-0 h-28 bg-gradient-to-b from-ink/90 to-transparent" />
-        <div className="pointer-events-none absolute inset-x-0 bottom-0 h-32 bg-gradient-to-t from-ink to-transparent" />
+        <div className="pointer-events-none absolute inset-x-0 top-0 h-28 bg-gradient-to-b from-lacquer/90 to-transparent" />
+        <div className="pointer-events-none absolute inset-x-0 bottom-0 h-32 bg-gradient-to-t from-lacquer to-transparent" />
 
         {/* Accessible heading — the particle word is not readable to screen readers */}
         <h1 className="sr-only">{hero.title}</h1>
@@ -917,9 +923,9 @@ export default function ScrollScene({
           <div className="absolute inset-0 grid place-items-center">
             <div className="flex flex-col items-center gap-5">
               <div className="h-px w-32 bg-white/10 overflow-hidden">
-                <div className="h-full w-full bg-accent/80 animate-pulse-soft" />
+                <div className="h-full w-full bg-jade-bright/80 animate-pulse-soft" />
               </div>
-              <p className="font-mono text-[11px] tracking-[0.35em] uppercase text-steel-dim animate-pulse-soft">
+              <p className="font-mono text-[11px] tracking-[0.35em] uppercase text-bone-dim animate-pulse-soft">
                 {hero.loading}
               </p>
             </div>
@@ -932,10 +938,10 @@ export default function ScrollScene({
           style={{ opacity: heroOpacity }}
         >
           <div className={ready ? 'animate-fade-up [animation-delay:600ms]' : 'opacity-0'}>
-            <p className="font-mono text-[11px] md:text-xs tracking-[0.4em] uppercase text-accent/80 text-center mb-4">
+            <p className="font-mono text-[11px] md:text-xs tracking-[0.4em] uppercase text-brass/90 text-center mb-4">
               {hero.eyebrow}
             </p>
-            <p className="font-display text-lg md:text-2xl text-steel-light/90 text-center px-6">
+            <p className="font-display text-xl md:text-3xl text-ivory/90 text-center px-6">
               {hero.subtitle}
             </p>
           </div>
@@ -944,10 +950,10 @@ export default function ScrollScene({
               ready ? 'animate-fade-up [animation-delay:1200ms]' : 'opacity-0'
             }`}
           >
-            <span className="font-mono text-[10px] tracking-[0.35em] uppercase text-steel-dim">
+            <span className="font-mono text-[10px] tracking-[0.35em] uppercase text-bone-dim">
               {hero.scrollHint}
             </span>
-            <span className="block h-10 w-px bg-gradient-to-b from-accent/70 to-transparent animate-scroll-line" />
+            <span className="block h-10 w-px bg-gradient-to-b from-brass/70 to-transparent animate-scroll-line" />
           </div>
         </div>
 
@@ -969,13 +975,13 @@ export default function ScrollScene({
                         : 'opacity-0 translate-y-8'
                   }`}
                 >
-                  <p className="font-mono text-xs tracking-[0.35em] text-accent mb-5">
+                  <p className="font-mono text-xs tracking-[0.35em] text-jade-bright mb-5">
                     {String(i + 1).padStart(2, '0')} / {String(stages.length).padStart(2, '0')}
                   </p>
-                  <h3 className="font-display text-3xl md:text-5xl font-semibold text-white tracking-tight mb-5">
+                  <h3 className="font-display text-3xl md:text-5xl font-semibold text-ivory tracking-tight mb-5">
                     {stage.title}
                   </h3>
-                  <p className="text-steel-mid text-base md:text-lg leading-relaxed border-l border-white/15 pl-5">
+                  <p className="text-bone text-base md:text-lg leading-relaxed border-l border-brass/30 pl-5">
                     {stage.text}
                   </p>
                 </div>
@@ -986,16 +992,16 @@ export default function ScrollScene({
 
         {/* Scroll progress rail */}
         <div className="absolute right-6 lg:right-8 top-1/2 -translate-y-1/2 hidden md:flex flex-col items-center gap-3">
-          <span className="font-mono text-[10px] text-steel-dim tabular-nums">
+          <span className="font-mono text-[10px] text-bone-dim tabular-nums">
             {String(Math.round(progress * 100)).padStart(3, '0')}
           </span>
           <div className="relative h-44 w-px bg-white/10 overflow-hidden">
             <div
-              className="absolute top-0 left-0 w-full bg-accent shadow-[0_0_12px_rgba(56,223,255,0.9)]"
+              className="absolute top-0 left-0 w-full bg-brass shadow-[0_0_12px_rgba(201,169,107,0.9)]"
               style={{ height: `${progress * 100}%` }}
             />
           </div>
-          <span className="font-mono text-[10px] text-steel-dim tabular-nums">100</span>
+          <span className="font-mono text-[10px] text-bone-dim tabular-nums">100</span>
         </div>
       </div>
     </div>

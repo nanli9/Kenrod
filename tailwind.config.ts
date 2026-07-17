@@ -7,26 +7,50 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        // Near-black with a blue undertone; raised/card step up for layering.
+        // Warm near-black, like lacquered wood — dark sections (hero, stats, contact, footer)
+        lacquer: {
+          DEFAULT: '#0b0a08',
+          raised: '#141109',
+        },
+        // Warm gallery paper — light sections where the photography hangs
+        paper: {
+          DEFAULT: '#f5f1e8',
+          deep: '#ebe4d4',
+        },
+        // Warm ink for text on paper
         ink: {
-          DEFAULT: '#04060b',
-          raised: '#090d15',
-          card: '#0b101b',
+          DEFAULT: '#1d1912',
+          soft: '#57503f',
         },
-        // Single electric accent — used for micro-details, never large fills.
-        accent: {
-          DEFAULT: '#38dfff',
-          soft: '#8fd8ef',
+        // Ivory/bone for text on lacquer
+        ivory: '#f2ede0',
+        bone: {
+          DEFAULT: '#cec4ad',
+          dim: '#877e69',
         },
-        steel: {
-          light: '#dbe6f3',
-          mid: '#8b96a9',
-          dim: '#5a6376',
+        // Imperial jade — the accent; deep works on paper, bright on lacquer
+        jade: {
+          DEFAULT: '#12896b',
+          bright: '#3bc79d',
+          deep: '#0b5c49',
         },
+        // Champagne brass — hairlines and micro-details only
+        brass: {
+          DEFAULT: '#c9a96b',
+          dim: '#9a8256',
+        },
+        // Vermilion — reserved exclusively for the 国友 seal chop
+        seal: '#b23b2b',
       },
       fontFamily: {
         sans: ['var(--font-inter)', 'system-ui', '-apple-system', 'sans-serif'],
-        display: ['var(--font-display)', 'var(--font-inter)', 'system-ui', 'sans-serif'],
+        display: [
+          'var(--font-fraunces)',
+          'var(--font-noto-serif-sc)',
+          'Georgia',
+          'Songti SC',
+          'serif',
+        ],
         mono: ['var(--font-mono)', 'ui-monospace', 'SFMono-Regular', 'monospace'],
       },
       keyframes: {

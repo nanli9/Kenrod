@@ -4,24 +4,22 @@ import Image from 'next/image';
 import { useTranslations } from 'next-intl';
 import ScrollScene from '@/components/three/ScrollScene';
 
-/* Corner tick marks — revealed on hover, the "measured drawing" detail */
-function CornerTicks() {
-  const base =
-    'pointer-events-none absolute h-3 w-3 border-accent/0 group-hover:border-accent/70 transition-colors duration-300';
+function Eyebrow({
+  index,
+  tone = 'paper',
+  children,
+}: {
+  index: string;
+  tone?: 'paper' | 'lacquer';
+  children: React.ReactNode;
+}) {
+  const text = tone === 'paper' ? 'text-jade-deep' : 'text-brass/90';
+  const rule = tone === 'paper' ? 'bg-jade/60' : 'bg-brass/50';
   return (
-    <>
-      <span aria-hidden className={`${base} -top-px -left-px border-t border-l`} />
-      <span aria-hidden className={`${base} -top-px -right-px border-t border-r`} />
-      <span aria-hidden className={`${base} -bottom-px -left-px border-b border-l`} />
-      <span aria-hidden className={`${base} -bottom-px -right-px border-b border-r`} />
-    </>
-  );
-}
-
-function Eyebrow({ index, children }: { index: string; children: React.ReactNode }) {
-  return (
-    <p className="flex items-center gap-3 font-mono text-[11px] uppercase tracking-[0.35em] text-accent/80 mb-5">
-      <span aria-hidden className="h-px w-8 bg-accent/50" />
+    <p
+      className={`flex items-center gap-3 font-mono text-[11px] uppercase tracking-[0.35em] mb-5 ${text}`}
+    >
+      <span aria-hidden className={`h-px w-8 ${rule}`} />
       {index} / {children}
     </p>
   );
@@ -44,29 +42,28 @@ function ProductsSection() {
   }));
 
   return (
-    <section id="products" className="relative scroll-mt-16 py-24 md:py-32 px-4 sm:px-6 lg:px-8 bg-ink overflow-hidden">
-      <div aria-hidden className="absolute inset-0 tech-grid tech-grid-fade" />
-      <div className="relative max-w-7xl mx-auto">
-        <div className="flex flex-col md:flex-row md:items-end md:justify-between gap-6 mb-14 md:mb-20">
+    <section
+      id="products"
+      className="relative scroll-mt-16 py-24 md:py-32 px-4 sm:px-6 lg:px-8 bg-paper text-ink"
+    >
+      <div className="max-w-7xl mx-auto">
+        <div className="flex flex-col md:flex-row md:items-end md:justify-between gap-6 mb-16 md:mb-24">
           <div>
             <Eyebrow index="01">{t('nav.products')}</Eyebrow>
-            <h2 className="font-display text-3xl md:text-5xl font-semibold tracking-tight text-white">
+            <h2 className="font-display text-4xl md:text-6xl font-semibold tracking-tight">
               {t('products.title')}
             </h2>
           </div>
-          <p className="max-w-sm text-sm leading-relaxed text-steel-mid md:text-right">
+          <p className="max-w-sm text-sm leading-relaxed text-ink-soft md:text-right">
             {t('products.description')}
           </p>
         </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5 lg:gap-6">
+        {/* Gallery hang: staggered frames with placard captions */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-8 gap-y-16">
           {items.map((item, i) => (
-            <div
-              key={i}
-              className="group relative border border-white/[0.07] bg-ink-card hover:border-accent/40 transition-colors duration-300"
-            >
-              <CornerTicks />
-              <div className="relative aspect-[4/5] overflow-hidden">
+            <figure key={i} className={`group ${i === 1 ? 'lg:mt-20' : ''}`}>
+              <div className="relative aspect-[3/4] overflow-hidden rounded-xl border border-ink/10 shadow-[0_24px_60px_-28px_rgba(29,25,18,0.4)]">
                 <Image
                   src={item.image}
                   alt={item.name}
@@ -74,43 +71,41 @@ function ProductsSection() {
                   sizes="(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 33vw"
                   className="object-cover transition-transform duration-700 group-hover:scale-[1.04]"
                 />
-                <div
-                  aria-hidden
-                  className="absolute inset-0 bg-gradient-to-t from-ink-card via-transparent to-transparent opacity-80"
-                />
               </div>
-              <div className="p-6">
-                <div className="flex items-center justify-between mb-3">
-                  <span className="font-mono text-[10px] tracking-[0.3em] text-steel-dim">
+              <figcaption className="mt-6">
+                <div className="flex items-baseline justify-between mb-2">
+                  <span className="font-mono text-[10px] tracking-[0.3em] text-ink-soft/70 uppercase">
                     UNIT {String(i + 1).padStart(2, '0')}
                   </span>
                   <span
                     aria-hidden
-                    className="font-mono text-xs text-steel-dim group-hover:text-accent group-hover:translate-x-0.5 transition-all"
+                    className="font-mono text-xs text-ink-soft/50 group-hover:text-jade-deep group-hover:translate-x-0.5 transition-all"
                   >
                     ↗
                   </span>
                 </div>
-                <h3 className="font-display text-lg font-semibold text-white mb-2">
-                  {item.name}
-                </h3>
-                <p className="text-sm leading-relaxed text-steel-mid">{item.desc}</p>
-              </div>
-            </div>
+                <h3 className="font-display text-2xl font-semibold mb-2">{item.name}</h3>
+                <p className="text-sm leading-relaxed text-ink-soft max-w-xs">{item.desc}</p>
+                <span
+                  aria-hidden
+                  className="block h-px w-full bg-brass mt-5 scale-x-0 group-hover:scale-x-100 origin-left transition-transform duration-500"
+                />
+              </figcaption>
+            </figure>
           ))}
         </div>
 
         {/* TODO: Replace # with actual store URLs */}
-        <div className="flex flex-wrap justify-center gap-4 mt-14 md:mt-16">
+        <div className="flex flex-wrap justify-center gap-4 mt-20">
           <a
             href="#"
-            className="inline-flex h-12 items-center px-8 rounded-full bg-white text-ink text-sm font-medium tracking-wide hover:bg-steel-light transition-colors"
+            className="inline-flex h-12 items-center px-8 rounded-full bg-ink text-paper text-sm font-medium tracking-wide hover:bg-jade-deep transition-colors"
           >
             {t('products.buy_shopify')}
           </a>
           <a
             href="#"
-            className="inline-flex h-12 items-center px-8 rounded-full border border-white/15 text-steel-light text-sm font-medium tracking-wide hover:border-accent/50 hover:text-white transition-colors"
+            className="inline-flex h-12 items-center px-8 rounded-full border border-ink/20 text-ink text-sm font-medium tracking-wide hover:border-jade hover:text-jade-deep transition-colors"
           >
             {t('products.buy_amazon')}
           </a>
@@ -133,47 +128,53 @@ function AboutSection() {
   }));
 
   return (
-    <section id="about" className="relative scroll-mt-16 py-24 md:py-32 px-4 sm:px-6 lg:px-8 bg-ink-raised border-y border-white/[0.05]">
+    <section
+      id="about"
+      className="relative scroll-mt-16 py-24 md:py-32 px-4 sm:px-6 lg:px-8 bg-paper-deep text-ink border-t border-ink/10"
+    >
       <div className="max-w-7xl mx-auto">
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-12 lg:gap-20">
           <div className="lg:sticky lg:top-28 self-start">
             <Eyebrow index="02">{t('nav.about')}</Eyebrow>
-            <h2 className="font-display text-3xl md:text-5xl font-semibold tracking-tight text-white mb-6">
+            <h2 className="font-display text-4xl md:text-6xl font-semibold tracking-tight mb-6">
               {t('about.title')}
             </h2>
-            <p className="text-base leading-relaxed text-steel-mid max-w-lg">
+            <p className="text-base leading-relaxed text-ink-soft max-w-lg">
               {t('about.description')}
             </p>
           </div>
 
-          <div className="divide-y divide-white/[0.07] border-y border-white/[0.07]">
+          <div className="divide-y divide-ink/10 border-y border-ink/10">
             {capabilities.map((cap, i) => (
               <div key={i} className="group flex gap-6 py-8">
-                <span className="font-mono text-xs text-accent/70 pt-1.5">
+                <span className="font-mono text-xs text-jade-deep pt-1.5">
                   {String(i + 1).padStart(2, '0')}
                 </span>
                 <div>
-                  <h3 className="font-display text-lg md:text-xl font-semibold text-white mb-2 group-hover:text-accent-soft transition-colors">
+                  <h3 className="font-display text-xl md:text-2xl font-semibold mb-2 group-hover:text-jade-deep transition-colors">
                     {cap.title}
                   </h3>
-                  <p className="text-sm leading-relaxed text-steel-mid">{cap.text}</p>
+                  <p className="text-sm leading-relaxed text-ink-soft">{cap.text}</p>
                 </div>
               </div>
             ))}
           </div>
         </div>
 
-        <div className="mt-20 md:mt-24 grid grid-cols-2 lg:grid-cols-4 gap-px bg-white/[0.07] border border-white/[0.07]">
-          {stats.map((stat, i) => (
-            <div key={i} className="bg-ink-raised p-7 md:p-9">
-              <p className="font-display text-3xl md:text-4xl font-semibold text-white mb-2">
-                {stat.value}
-              </p>
-              <p className="font-mono text-[10px] uppercase tracking-[0.25em] text-steel-dim leading-relaxed">
-                {stat.label}
-              </p>
-            </div>
-          ))}
+        {/* Lacquer vitrine — the dark stats case set into the gallery wall */}
+        <div className="mt-20 md:mt-24 rounded-2xl border border-brass/25 overflow-hidden">
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-px bg-brass/20">
+            {stats.map((stat, i) => (
+              <div key={i} className="bg-lacquer p-7 md:p-9">
+                <p className="font-display text-3xl md:text-4xl font-semibold text-ivory mb-2">
+                  {stat.value}
+                </p>
+                <p className="font-mono text-[10px] uppercase tracking-[0.25em] text-bone-dim leading-relaxed">
+                  {stat.label}
+                </p>
+              </div>
+            ))}
+          </div>
         </div>
       </div>
     </section>
@@ -204,30 +205,33 @@ function ContactSection() {
   const tNav = useTranslations('nav');
 
   return (
-    <section id="contact" className="relative scroll-mt-16 py-24 md:py-36 px-4 sm:px-6 lg:px-8 bg-ink overflow-hidden">
-      <div aria-hidden className="absolute inset-0 tech-grid tech-grid-fade" />
+    <section
+      id="contact"
+      className="relative scroll-mt-16 py-24 md:py-36 px-4 sm:px-6 lg:px-8 bg-lacquer overflow-hidden"
+    >
+      <div aria-hidden className="absolute inset-0 brass-grid grid-fade" />
       <div className="relative max-w-2xl mx-auto text-center">
-        <p className="flex items-center justify-center gap-3 font-mono text-[11px] uppercase tracking-[0.35em] text-accent/80 mb-5">
-          <span aria-hidden className="h-px w-8 bg-accent/50" />
+        <p className="flex items-center justify-center gap-3 font-mono text-[11px] uppercase tracking-[0.35em] text-brass/90 mb-5">
+          <span aria-hidden className="h-px w-8 bg-brass/50" />
           03 / {tNav('contact')}
-          <span aria-hidden className="h-px w-8 bg-accent/50" />
+          <span aria-hidden className="h-px w-8 bg-brass/50" />
         </p>
-        <h2 className="font-display text-3xl md:text-5xl font-semibold tracking-tight text-white mb-5">
+        <h2 className="font-display text-4xl md:text-6xl font-semibold tracking-tight text-ivory mb-5">
           {t('title')}
         </h2>
-        <p className="text-steel-mid mb-10">{t('description')}</p>
+        <p className="text-bone mb-10">{t('description')}</p>
 
         {/* Email CTA */}
         <div className="flex flex-col items-center gap-4 mb-14">
           <a
             href={`mailto:${t('email_address')}`}
-            className="inline-flex h-12 items-center px-8 rounded-full bg-white text-ink text-sm font-medium tracking-wide hover:bg-steel-light transition-colors"
+            className="inline-flex h-12 items-center px-8 rounded-full bg-jade text-white text-sm font-medium tracking-wide hover:bg-jade-bright hover:text-lacquer transition-colors"
           >
             {t('email_cta')}
           </a>
           <a
             href={`mailto:${t('email_address')}`}
-            className="font-mono text-xs text-steel-dim hover:text-accent transition-colors tracking-wider"
+            className="font-mono text-xs text-bone-dim hover:text-jade-bright transition-colors tracking-wider"
           >
             {t('email_address')}
           </a>
@@ -235,7 +239,7 @@ function ContactSection() {
 
         {/* Social Media Links */}
         <div className="mb-10">
-          <p className="font-mono text-[10px] uppercase tracking-[0.3em] text-steel-dim mb-5">
+          <p className="font-mono text-[10px] uppercase tracking-[0.3em] text-bone-dim mb-5">
             {t('follow_us')}
           </p>
           <div className="flex justify-center gap-3">
@@ -245,7 +249,7 @@ function ContactSection() {
                 key={s.label}
                 href="#"
                 aria-label={s.label}
-                className="grid place-items-center w-11 h-11 rounded-lg border border-white/10 text-steel-mid hover:text-accent hover:border-accent/40 transition-colors"
+                className="grid place-items-center w-11 h-11 rounded-lg border border-bone/20 text-bone hover:text-jade-bright hover:border-jade/50 transition-colors"
               >
                 <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
                   <path d={s.path} />
@@ -255,7 +259,7 @@ function ContactSection() {
           </div>
         </div>
 
-        <p className="font-mono text-xs text-steel-dim tracking-wider">{t('address')}</p>
+        <p className="font-mono text-xs text-bone-dim tracking-wider">{t('address')}</p>
       </div>
     </section>
   );

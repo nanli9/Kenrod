@@ -14,7 +14,7 @@ export default function LanguageSwitcher() {
   const pathname = usePathname();
 
   return (
-    <div className="flex items-center border border-white/10 rounded-full p-0.5">
+    <div className="flex items-center border border-bone/20 rounded-full p-0.5">
       {LOCALES.map(({ code, label }) => (
         <button
           key={code}
@@ -22,8 +22,8 @@ export default function LanguageSwitcher() {
           aria-pressed={locale === code}
           className={`h-7 px-3 rounded-full font-mono text-[10px] tracking-wider transition-colors ${
             locale === code
-              ? 'bg-white/10 text-white'
-              : 'text-steel-dim hover:text-steel-light'
+              ? 'bg-ivory/10 text-ivory'
+              : 'text-bone-dim hover:text-bone'
           }`}
         >
           {label}
