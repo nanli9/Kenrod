@@ -905,7 +905,9 @@ function SplatCloud({
           value:
             typeof window !== 'undefined' && window.innerWidth < 820 ? 120 : 220,
         },
-        uGrade: { value: src.photoreal ? 1 : 0 },
+        // 0 => the capture renders in its true 3DGS colours; flip to
+        // src.photoreal ? 1 : 0 to re-engage the silver-gelatin mono grade
+        uGrade: { value: 0 },
         uMouse: { value: new THREE.Vector2(99, 99) },
         uTime: { value: 0 },
         uRepel: { value: 0.38 },
