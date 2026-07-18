@@ -34,6 +34,17 @@ const notoHei = Noto_Sans_SC({
   preload: false,
 });
 
+// Mid-weight hanzi for the lockup's small secondary line (制造): the 900
+// face's inter-stroke gaps clog with particle grain at that size, exactly
+// like Anton's counters did for the latin. Same unicode-range slicing —
+// visitors only download the slices for glyphs actually drawn.
+const notoHeiMid = Noto_Sans_SC({
+  weight: '500',
+  variable: '--font-hei-mid',
+  display: 'swap',
+  preload: false,
+});
+
 const plexMono = IBM_Plex_Mono({
   weight: ['400', '500'],
   subsets: ['latin'],
@@ -63,7 +74,7 @@ export default async function LocaleLayout({
     <html
       lang={locale}
       suppressHydrationWarning
-      className={`${inter.variable} ${anton.variable} ${plexMono.variable} ${notoHei.variable}`}
+      className={`${inter.variable} ${anton.variable} ${plexMono.variable} ${notoHei.variable} ${notoHeiMid.variable}`}
     >
       <body className="min-h-screen flex flex-col bg-void text-smoke font-sans">
         <NextIntlClientProvider messages={messages}>

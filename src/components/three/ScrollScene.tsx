@@ -59,23 +59,41 @@ function smoothstep(t: number) {
 // so a canvas asking for "Anton" silently falls back to Impact/system sans and
 // the browser fake-bolds it into mush. Resolve the real family list by probing
 // a computed style built from the CSS variables the fonts are exposed through.
-function resolveDisplayFamilies() {
+function resolveFamilies(cssVars: string) {
   const fallback = '"Heiti SC", "PingFang SC", "Microsoft YaHei", Impact, sans-serif';
   if (typeof document === 'undefined') return fallback;
   const probe = document.createElement('span');
-  probe.style.fontFamily = 'var(--font-anton), var(--font-hei)';
+  probe.style.fontFamily = cssVars;
   document.body.appendChild(probe);
   const fam = getComputedStyle(probe).fontFamily;
   probe.remove();
   return fam ? `${fam}, ${fallback}` : fallback;
 }
 
+// Wordmark face: the ultra-condensed poster Anton (+ heavy hanzi fallback).
+const WORDMARK_VARS = 'var(--font-anton), var(--font-hei)';
+// Secondary-line face: Plex Mono + mid-weight hanzi, NOT Anton/black hanzi —
+// at secondary size Anton's counters and the 900 face's inter-stroke gaps are
+// hairline slivers the splat bloom seals shut (M/N/G and 制造 were mush).
+// Open, lighter letterforms survive the grain, and the mono matches the
+// site's label typography (eyebrow, nav, stats).
+const SECONDARY_VARS = 'var(--font-mono), var(--font-hei-mid)';
+
 // Sampling lattice pitch, px. buildSplatData spreads the splats stacked on one
 // sampled pixel back across this cell, so the lattice never shows.
 const SAMPLE_STEP = 4;
 
-// Rasterize the title to an offscreen canvas and return its filled pixels.
-function sampleTextCoords(text: string) {
+// Rasterize the brand lockup to an offscreen canvas and return its filled
+// pixels as [x, y, r, g, b, step] runs (COORD_STRIDE). Layout mirrors the
+// logo: the first word set huge, a rule broken by the acid four-dot tile, and
+// the remaining words letter-spaced to justify across the wordmark's width.
+// `step` is the sampling pitch the pixel came from — the small rule/tile/
+// secondary band samples on a finer lattice than the wordmark, or the grain
+// eats its glyphs (an "M" stroke there spans barely two coarse cells).
+const COORD_STRIDE = 6;
+const FINE_STEP = 2;
+
+function sampleLockup(text: string) {
   const cw = 1200;
   const ch = 600;
   if (typeof document === 'undefined') return { coords: [] as number[], cw, ch };
@@ -86,66 +104,142 @@ function sampleTextCoords(text: string) {
   if (!ctx) return { coords: [], cw, ch };
 
   const words = text.trim().split(/\s+/);
-  let lines: string[];
-  if (words.length <= 1) {
-    lines = [text.trim()];
-  } else {
-    let best = [text.trim()];
-    let bestMax = Infinity;
-    for (let i = 1; i < words.length; i++) {
-      const l1 = words.slice(0, i).join(' ');
-      const l2 = words.slice(i).join(' ');
-      const m = Math.max(l1.length, l2.length);
-      if (m < bestMax) {
-        bestMax = m;
-        best = [l1, l2];
-      }
-    }
-    lines = best;
-  }
+  const primary = words[0] ?? '';
+  const secondary = words.slice(1).join(' ');
 
-  // Weight 400 on purpose: Anton's single face is registered as 400, and the
-  // hanzi face is registered 900-only so nearest-match picks it up — asking for
-  // a heavier weight than a face owns makes the canvas synthesize a fake bold
-  // that clogs the counters. Tracking keeps particle letters from merging.
-  const families = resolveDisplayFamilies();
-  const font = (s: number) => `400 ${s}px ${families}`;
-  const track = (s: number) => {
+  // Weights match what the faces register (Anton 400, Plex Mono 500, hanzi
+  // 900 picked up by nearest-match) — asking for a weight a face doesn't own
+  // makes the canvas synthesize a fake bold that clogs the counters.
+  const families = resolveFamilies(WORDMARK_VARS);
+  const familiesS = resolveFamilies(SECONDARY_VARS);
+  const font = (s: number, fam = families, w = 400) => `${w} ${s}px ${fam}`;
+  const track = (px: number) => {
     try {
-      ctx.letterSpacing = `${Math.round(s * 0.05)}px`;
+      ctx.letterSpacing = `${Math.round(px)}px`;
     } catch {
       /* older engines: no tracking, layout still works */
     }
   };
-  let fontSize = 400;
-  ctx.font = font(fontSize);
-  track(fontSize);
-  let maxW = 1;
-  for (const ln of lines) maxW = Math.max(maxW, ctx.measureText(ln).width);
-  fontSize = Math.max(
-    40,
-    Math.floor(
-      fontSize *
-        Math.min((cw * 0.88) / maxW, (ch * 0.72) / (lines.length * fontSize * 1.08))
-    )
-  );
+  const capOf = (s: string, size: number, fam = families, w = 400) => {
+    ctx.font = font(size, fam, w);
+    const m = ctx.measureText(s);
+    return m.actualBoundingBoxAscent > 0 ? m.actualBoundingBoxAscent : size * 0.72;
+  };
 
-  ctx.font = font(fontSize);
-  track(fontSize);
-  ctx.fillStyle = '#ffffff';
   ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  const lineH = fontSize * 1.08;
-  const startY = ch / 2 - ((lines.length - 1) * lineH) / 2;
-  lines.forEach((ln, i) => ctx.fillText(ln, cw / 2, startY + i * lineH));
+  ctx.textBaseline = 'alphabetic';
+
+  // Fit the wordmark to the poster width, then keep the whole stack (wordmark +
+  // rule row + secondary ≈ 1.66 cap heights) inside the canvas — a short brand
+  // word would otherwise blow up vertically.
+  track(2);
+  ctx.font = font(100);
+  const w100 = Math.max(1, ctx.measureText(primary).width);
+  let sizeP = Math.max(40, (100 * (cw * 0.88)) / w100);
+  const capRatio = capOf(primary, 100) / 100;
+  const maxCap = secondary ? ch * 0.5 : ch * 0.6;
+  if (sizeP * capRatio > maxCap) sizeP = maxCap / capRatio;
+  sizeP = Math.floor(sizeP);
+
+  ctx.font = font(sizeP);
+  track(sizeP * 0.02);
+  const mP = ctx.measureText(primary);
+  const capP = mP.actualBoundingBoxAscent > 0 ? mP.actualBoundingBoxAscent : sizeP * 0.72;
+  // ink width (bounding box, not advance width — advance includes the trailing
+  // letter-spacing, which would push the justified secondary line off-centre)
+  const inkW =
+    mP.actualBoundingBoxLeft + mP.actualBoundingBoxRight > 0
+      ? mP.actualBoundingBoxLeft + mP.actualBoundingBoxRight
+      : mP.width;
+
+  // Stack geometry below the wordmark baseline, proportions from the logo
+  // (tile and secondary run a touch larger than the print mark — particle
+  // grain eats thin strokes, so small elements need extra weight to read).
+  // The rule row gets clear air on both sides: tight against the wordmark it
+  // reads as underlining the D/O bottoms instead of dividing the lockup.
+  const ruleY = capP * 0.24; // rule/tile centreline
+  const baseS = capP * 0.74; // secondary baseline
+  const stackH = secondary ? capP + baseS + capP * 0.05 : capP;
+  const baseP = (ch - stackH) / 2 + capP;
+  let fineY = ch; // top of the fine-sampled band; ch => no band
+
+  ctx.fillStyle = '#ffffff';
+  ctx.fillText(primary, cw / 2, baseP);
+
+  if (secondary) {
+    // Rule broken by the acid four-dot tile (the die from the brand mark).
+    // Acid-deep rule so it reads quieter than the tile; the sampler keys the
+    // particle colour off these drawn pixels.
+    const side = capP * 0.3;
+    const cy = baseP + ruleY;
+    const gap = side * 0.55;
+    fineY = Math.max(0, Math.floor(cy - side / 2) - 2);
+    const ruleTh = Math.max(4, Math.round(capP * 0.024));
+    const halfW = inkW / 2;
+    ctx.fillStyle = '#9fce00';
+    ctx.fillRect(cw / 2 - halfW, cy - ruleTh / 2, halfW - side / 2 - gap, ruleTh);
+    ctx.fillRect(cw / 2 + side / 2 + gap, cy - ruleTh / 2, halfW - side / 2 - gap, ruleTh);
+
+    ctx.fillStyle = '#c6ff00';
+    if (typeof ctx.roundRect === 'function') {
+      ctx.beginPath();
+      ctx.roundRect(cw / 2 - side / 2, cy - side / 2, side, side, side * 0.26);
+      ctx.fill();
+    } else {
+      ctx.fillRect(cw / 2 - side / 2, cy - side / 2, side, side);
+    }
+    ctx.globalCompositeOperation = 'destination-out';
+    for (const sx of [-1, 1])
+      for (const sy of [-1, 1]) {
+        ctx.beginPath();
+        ctx.arc(cw / 2 + sx * side * 0.23, cy + sy * side * 0.23, side * 0.17, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    ctx.globalCompositeOperation = 'source-over';
+
+    // Secondary line, justified to the wordmark by hand-spacing the glyphs —
+    // canvas letter-spacing also pads after the last glyph, which skews the
+    // centring. The gap clamp keeps a two-hanzi secondary from flying apart.
+    const sizeS = Math.max(
+      24,
+      Math.floor((capP * 0.26 * 100) / capOf(secondary, 100, familiesS, 500))
+    );
+    ctx.font = font(sizeS, familiesS, 500);
+    track(0);
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#ffffff';
+    const chars = Array.from(secondary);
+    const widths = chars.map((c) => ctx.measureText(c).width);
+    const sum = widths.reduce((a, b) => a + b, 0);
+    const gapC =
+      chars.length > 1
+        ? Math.min(Math.max((inkW - sum) / (chars.length - 1), sizeS * 0.05), sizeS * 1.4)
+        : 0;
+    let x = cw / 2 - (sum + gapC * (chars.length - 1)) / 2;
+    chars.forEach((c, i) => {
+      ctx.fillText(c, x, baseP + baseS);
+      x += widths[i] + gapC;
+    });
+  }
 
   const img = ctx.getImageData(0, 0, cw, ch).data;
   const coords: number[] = [];
-  for (let y = 0; y < ch; y += SAMPLE_STEP) {
-    for (let x = 0; x < cw; x += SAMPLE_STEP) {
-      if (img[(y * cw + x) * 4 + 3] > 128) coords.push(x, y);
-    }
-  }
+  const pushIf = (x: number, y: number, step: number) => {
+    const i = (y * cw + x) * 4;
+    if (img[i + 3] > 128) coords.push(x, y, img[i], img[i + 1], img[i + 2], step);
+  };
+  for (let y = 0; y < fineY; y += SAMPLE_STEP)
+    for (let x = 0; x < cw; x += SAMPLE_STEP) pushIf(x, y, SAMPLE_STEP);
+  // Fine band, thinned to ~55%: splats are allocated per coord, so a full 2px
+  // lattice would pull 4x the wordmark's splat density into the band. ~55%
+  // keeps the fill gapless (harder thinning leaves Poisson holes in the thin
+  // strokes); the leftover ~2x density surplus is paid back in per-splat
+  // alpha (see the fine-band alpha factor in buildSplatData) so the gaussian
+  // tails don't dilate small strokes until their counters close — that was
+  // the original "M is unreadable" bug.
+  for (let y = fineY; y < ch; y += FINE_STEP)
+    for (let x = 0; x < cw; x += FINE_STEP)
+      if (Math.random() < 0.55) pushIf(x, y, FINE_STEP);
   return { coords, cw, ch };
 }
 
@@ -232,8 +326,8 @@ type SplatData = {
 // at 150k splats a per-frame CPU lerp would not hold 60fps.
 function buildSplatData(text: string, src: ModelSource): SplatData {
   // Poster type is shouted: uppercase the latin, CJK passes through unchanged.
-  const { coords, cw, ch } = sampleTextCoords(text.toUpperCase());
-  const textCount = Math.max(1, coords.length / 2);
+  const { coords, cw, ch } = sampleLockup(text.toUpperCase());
+  const textCount = Math.max(1, coords.length / COORD_STRIDE);
   const count = src.count;
 
   const scatterA = new Float32Array(count * 3);
@@ -244,7 +338,15 @@ function buildSplatData(text: string, src: ModelSource): SplatData {
   const delayMorph = new Float32Array(count);
   const delayBlast = new Float32Array(count);
 
-  const worldW = 9;
+  // Fit the poster to the viewport: the camera rests at z=10 with fov 50, so
+  // the visible width at the word's plane (z=0) is 2*tan(25°)*10*aspect ≈
+  // 9.33*aspect world units. Desktop keeps the full 9-unit poster; narrow
+  // screens shrink the lockup so the wordmark is never cropped mid-glyph.
+  const aspect =
+    typeof window !== 'undefined'
+      ? window.innerWidth / Math.max(1, window.innerHeight)
+      : 16 / 9;
+  const worldW = Math.min(9, 9.33 * aspect * 0.92);
   const worldH = (worldW * ch) / cw; // keep text aspect
 
   // model vertical range, for the fallback gradient
@@ -263,6 +365,19 @@ function buildSplatData(text: string, src: ModelSource): SplatData {
   const cCharcoal = new THREE.Color('#2a2a28');
   const tmp = new THREE.Color();
 
+  // Splats are dealt to coords in a shuffled order: the quality governor trims
+  // by instanceCount (first n splat indices), and a monotone index→coord map
+  // would erase the lockup bottom-up on weak devices — the secondary line
+  // first. Shuffled, a trim just thins the grain evenly everywhere.
+  const coordOf = new Uint32Array(textCount);
+  for (let i = 0; i < textCount; i++) coordOf[i] = i;
+  for (let i = textCount - 1; i > 0; i--) {
+    const j = (Math.random() * (i + 1)) | 0;
+    const t = coordOf[i];
+    coordOf[i] = coordOf[j];
+    coordOf[j] = t;
+  }
+
   const texH = Math.ceil((count * TEXELS_PER_SPLAT) / TEX_W);
   const data = new Float32Array(TEX_W * texH * 4);
 
@@ -273,14 +388,19 @@ function buildSplatData(text: string, src: ModelSource): SplatData {
     // ~10+ splats share each sampled pixel, so scatter them across the sampling
     // cell — without the jitter they stack into one fat dot per lattice point
     // and the word reads as chunky mush instead of fine grain.
-    const cell = (worldW * SAMPLE_STEP) / cw;
-    const ti = Math.floor((k * textCount) / count) % textCount;
-    const tx = coords[ti * 2] ?? cw / 2;
-    const ty = coords[ti * 2 + 1] ?? ch / 2;
+    const o6 = coordOf[Math.floor((k * textCount) / count) % textCount] * COORD_STRIDE;
+    const tx = coords[o6] ?? cw / 2;
+    const ty = coords[o6 + 1] ?? ch / 2;
+    // jitter across the cell of the lattice this pixel was sampled on — the
+    // fine band gets proportionally tighter scatter, which is what keeps its
+    // small glyph edges sharp
+    const step = coords[o6 + 5] ?? SAMPLE_STEP;
+    const cell = (worldW * step) / cw;
     textHome[i3] = (tx / cw - 0.5) * worldW + (Math.random() - 0.5) * cell;
     textHome[i3 + 1] = -(ty / ch - 0.5) * worldH + (Math.random() - 0.5) * cell;
-    // thin slab: a deep z-jitter blurs the word's edges
-    textHome[i3 + 2] = (Math.random() - 0.5) * 0.18;
+    // thin slab: a deep z-jitter blurs the word's edges — and the fine band's
+    // small glyphs can afford even less of it
+    textHome[i3 + 2] = (Math.random() - 0.5) * (step < SAMPLE_STEP ? 0.08 : 0.18);
 
     modelHome[i3] = src.pos[i3];
     modelHome[i3 + 1] = src.pos[i3 + 1];
@@ -311,10 +431,34 @@ function buildSplatData(text: string, src: ModelSource): SplatData {
     delayMorph[k] = Math.random() * 0.08;
     delayBlast[k] = Math.random() * 0.12;
 
-    // text colour: smoke body, a little gray shadow, rare acid strikes. Gray
-    // kept sparse — too much of it reads as dark mottling inside the letters.
-    const rc = Math.random();
-    const tc = rc < 0.9 ? cSmoke : rc < 0.955 ? cGray : cAcid;
+    // text colour: the rule/tile pixels keep their drawn acid colour; white ink
+    // gets the grain mix — smoke body, a little gray shadow, rare acid strikes.
+    // Gray/acid kept sparse (mottling reads as dirt, not texture), and the fine
+    // band gets none of the acid and even less gray: at small glyph sizes any
+    // off-colour speck reads as a damaged letter.
+    let tr: number;
+    let tg: number;
+    let tb: number;
+    if ((coords[o6 + 4] ?? 255) < 128) {
+      tr = coords[o6 + 2] / 255;
+      tg = coords[o6 + 3] / 255;
+      tb = coords[o6 + 4] / 255;
+    } else {
+      const rc = Math.random();
+      const tc =
+        step < SAMPLE_STEP
+          ? rc < 0.96
+            ? cSmoke
+            : cGray
+          : rc < 0.93
+            ? cSmoke
+            : rc < 0.98
+              ? cGray
+              : cAcid;
+      tr = tc.r;
+      tg = tc.g;
+      tb = tc.b;
+    }
 
     // model colour: photoreal from the capture (graded high-contrast B&W in the
     // shader), else a charcoal->smoke height gradient for the bare CAD cloud
@@ -332,9 +476,9 @@ function buildSplatData(text: string, src: ModelSource): SplatData {
       mg = tmp.g;
       mb = tmp.b;
     } else {
-      mr = tc.r;
-      mg = tc.g;
-      mb = tc.b;
+      mr = tr;
+      mg = tg;
+      mb = tb;
     }
 
     // pack 8 RGBA texels per splat (see the fetch() calls in the vertex shader)
@@ -355,9 +499,13 @@ function buildSplatData(text: string, src: ModelSource): SplatData {
     data[o + 13] = scatterB[i3 + 1];
     data[o + 14] = scatterB[i3 + 2];
     data[o + 15] = src.opacity[k];
-    data[o + 16] = tc.r;
-    data[o + 17] = tc.g;
-    data[o + 18] = tc.b;
+    data[o + 16] = tr;
+    data[o + 17] = tg;
+    data[o + 18] = tb;
+    // per-splat text alpha: the fine band runs ~2x the wordmark's splat
+    // density, so its splats render at ~half alpha — equal ink coverage from
+    // twice the positions is what keeps small glyph edges sharp
+    data[o + 19] = step < SAMPLE_STEP ? 0.55 : 1;
     data[o + 20] = mr;
     data[o + 21] = mg;
     data[o + 22] = mb;
@@ -484,9 +632,11 @@ void main() {
   float dust = mix(0.05, 1.0, a);
   float fade = 1.0 - 0.9 * b;
   vec3 modelCol = mix(t5.rgb, gradeMono(t5.rgb), uGrade);
+  // t4.w: per-splat text alpha factor — the finely-sampled lockup band packs
+  // ~2x the splat density and pays it back here so strokes don't bloom fat
   vColor = vec4(
     mix(t4.rgb, modelCol, m),
-    mix(uTextAlpha * dust, t3.w, m) * fade
+    mix(uTextAlpha * t4.w * dust, t3.w, m) * fade
   );
 
   // text particles are isotropic dots that bloom into the real gaussian
@@ -673,10 +823,12 @@ function SplatCloud({
       // the resolved next/font family names and the actual glyphs so the
       // subset hanzi face downloads before the first sample.
       try {
-        const families = resolveDisplayFamilies();
+        const families = resolveFamilies(WORDMARK_VARS);
+        const familiesS = resolveFamilies(SECONDARY_VARS);
         await Promise.allSettled([
           document.fonts.load(`400 200px ${families}`, text.toUpperCase()),
           document.fonts.load(`900 200px ${families}`, text.toUpperCase()),
+          document.fonts.load(`500 200px ${familiesS}`, text.toUpperCase()),
           document.fonts.ready,
         ]);
       } catch {
