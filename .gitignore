@@ -42,10 +42,10 @@ next-env.d.ts
 # JetBrains IDE
 /.idea/
 
-# Generated splat cloud (~5MB) built from a 3DGS .ply by scripts/model-to-points.mjs.
+# Generated splat cloud built from a 3DGS .ply by scripts/model-to-points.mjs.
 # Kept out of git history; the hero falls back to mahjong-points.bin if absent.
-# Regenerate:
-#   node scripts/model-to-points.mjs <capture.ply> public/models/mahjong-points.bin 150000 --up z
-# When the real product capture lands, decide deliberately: `git add -f` it, use
-# Git LFS, or fetch it from asset storage at deploy time.
+# Regenerate from the capture in assets/captures (see the README there):
+#   node scripts/model-to-points.mjs assets/captures/splat_clean.ply public/models/mahjong-points.bin 150000 --up z
+# The capture itself (~9MB) is tracked. If that gets heavy, move it to Git LFS or
+# asset storage rather than deleting it — it is the only source for this cloud.
 /public/models/*-splats.bin

@@ -39,6 +39,21 @@ const INTRO_SECONDS = 2.4;
 const MAX_FORM_DELAY = 0.08;
 const ASSEMBLE_WINDOW = ASSEMBLE_END - MAX_FORM_DELAY;
 
+// Model-hold framing. The capture is a table: everything worth showing — the
+// playfield, the dealing well, the tiles — is on TOP, so the group pitches
+// forward to put the camera ~45 degrees above it. A *negative* pitch here left
+// the hero parked under the table looking at its underside and legs.
+// Pitch, yaw and fit ride the morph ramp and the turn rides the hold, so all
+// four are zero while the word is still readable — the text beat is untouched.
+const MODEL_PITCH = 0.75; // rad (~43 deg) of look-down at the playfield
+const MODEL_YAW = 0.4; // rad off-axis, so it reads 3/4 rather than flat-on
+// Swept across the hold: a drift that shows the table has depth. This was a
+// full Math.PI, which spun the capture right past its good side.
+const MODEL_TURN = 0.55;
+// Pitched 43 deg the table's silhouette is ~6.4 world units against a ~7-unit
+// frustum at the zoom peak, and the near legs magnify past that. Fit it.
+const MODEL_FIT = 0.88;
+
 function lerp(a: number, b: number, t: number) {
   return a + (b - a) * t;
 }
@@ -988,13 +1003,15 @@ function SplatCloud({
     }
 
     // Scroll-driven 3D rotation (deterministic + reversible): no rotation while
-    // the word is readable, a gentle turn through the morph, then a sweep as the
-    // model holds and explodes. Must be a pure function of progress — an
-    // accumulator left the word mirrored after scrolling back up.
+    // the word is readable, then the capture swings up into a 3/4 view from
+    // above through the morph and drifts as it holds and explodes. Must be a
+    // pure function of progress — an accumulator left the word mirrored after
+    // scrolling back up.
     const rf = smoothstep(clamp01((p - MORPH_START) / (MORPH_END - MORPH_START)));
     const spinModel = clamp01((p - MORPH_END) / (1 - MORPH_END));
-    grp.rotation.y = rf * 0.5 + spinModel * Math.PI;
-    grp.rotation.x = -0.35 * rf;
+    grp.rotation.x = MODEL_PITCH * rf;
+    grp.rotation.y = MODEL_YAW * rf + spinModel * MODEL_TURN;
+    grp.scale.setScalar(1 - (1 - MODEL_FIT) * rf);
 
     // Re-sort only when the ordering can actually have changed: the splats moved
     // (progress) or the camera did. Idle frames reuse the last order. Degraded
