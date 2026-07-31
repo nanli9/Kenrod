@@ -6,11 +6,16 @@ Everything below is content/assets you still need to supply.
 
 ---
 
-## 1. Product hero — swap the placeholder model for the real one  ⭐ main next step
+## 1. Product hero — DONE ✅ (superseded, kept for the reasoning below)
 
-The hero currently shows a **placeholder**: a point cloud sampled from the
-incomplete CAD frame (`~/Desktop/model/source_models/XC-14-36kuang_simplified.stl`).
-Two ways to upgrade it — **no app code changes**, just regenerate the `.bin`:
+The hero no longer shows a placeholder. It streams nine real 3DGS captures of the
+machine and closes on an exploded CAD diagram; every input now lives inside this
+repo (`assets/captures/`, `assets/cad/`) and nothing reads a path outside it. See
+`assets/captures/README.md` and `assets/cad/README.md` for the current pipeline.
+
+The rest of this section describes the two options that were weighed at the time —
+option A (photoreal splat) is what shipped. Kept because the constraints it lists
+about `.ply` export and cropping still apply to any re-capture.
 
 ### Option A — photoreal 3D Gaussian Splat (recommended, "particles from the real product")
 1. Record a phone video orbiting the **real S300 table** (2–3 passes at different

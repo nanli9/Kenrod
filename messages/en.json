@@ -13,12 +13,26 @@
     "loading": "Loading model"
   },
   "scroll_scene": {
-    "stage1_title": "Precision Crafted",
-    "stage1_text": "Every component engineered to exacting specifications.",
-    "stage2_title": "Built to Last",
-    "stage2_text": "Premium materials and rigorous quality control.",
-    "stage3_title": "Designed for Performance",
-    "stage3_text": "Optimized geometry for maximum efficiency."
+    "layer0_title": "Entire Table",
+    "layer0_text": "The assembled machine, as a player sees it.",
+    "layer1_title": "Exterior Cabinet",
+    "layer1_text": "Rail, skirt and pedestal in one welded body. The only surface a player ever touches.",
+    "layer2_title": "Center Column & Control Dome",
+    "layer2_text": "Backlit glass dome, capacitive keys, powered dice bowl, and the lift column that raises it.",
+    "layer3_title": "Deck Cover",
+    "layer3_text": "One-piece PET deck with four recessed tile slots. The only interior surface tiles ever touch.",
+    "layer4_title": "Wall Builder & Lift",
+    "layer4_text": "Stores a sorted row, then a one-way geared crank lifts the finished wall flush to the deck.",
+    "layer5_title": "Shuffle & Feed",
+    "layer5_text": "Magnetic pickup wheels lift tiles face-correct out of the drum; a belt and cam head feed them on.",
+    "layer6_title": "Turntable",
+    "layer6_text": "Felted disc on twelve rollers. Tiles dropped through the deck land here and are swept to each drum.",
+    "layer7_title": "Structural Frame",
+    "layer7_text": "One folded steel deck carries every subassembly, so tolerances stack against a single datum.",
+    "layer8_title": "Power & Control",
+    "layer8_text": "Toroidal transformer and the main board, in a shielded box slung under the deck.",
+    "layer9_title": "Exploded View",
+    "layer9_text": "Every subassembly held at its own removal height. One folded steel datum, seven stacked systems, and the shell that closes over them."
   },
   "products": {
     "title": "Our Products",

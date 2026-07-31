@@ -42,10 +42,32 @@ next-env.d.ts
 # JetBrains IDE
 /.idea/
 
-# Generated splat cloud built from a 3DGS .ply by scripts/model-to-points.mjs.
-# Kept out of git history; the hero falls back to mahjong-points.bin if absent.
-# Regenerate from the capture in assets/captures (see the README there):
-#   node scripts/model-to-points.mjs assets/captures/splat_clean.ply public/models/mahjong-points.bin 150000 --up z
-# The capture itself (~9MB) is tracked. If that gets heavy, move it to Git LFS or
-# asset storage rather than deleting it — it is the only source for this cloud.
-/public/models/*-splats.bin
+# NOTE ON WHAT IS AND IS NOT IGNORED HERE.
+#
+# public/models/* is what the site SERVES, so none of it is ignored: the hero
+# cannot render without it and a clone of this repo has to be able to build and
+# deploy on its own. About 18 MB of binaries, which is deliberate. Rebuild with:
+#   node scripts/model-to-points.mjs assets/captures/cleanply/00_entire_table_clean.ply public/models/mahjong-points.bin 150000 --up z
+#   node scripts/build-layers.mjs
+#   /Applications/Blender.app/Contents/MacOS/Blender -b assets/cad/xuanyiji_master.blend -P scripts/build-cad-layers.py
+#
+# What IS ignored below is the two large SOURCE inputs, and one build
+# intermediate. None of the three lives outside this folder — nothing in the
+# project reads a path outside it — but none belongs in git history at its size,
+# and none is needed to build or serve the site, only to regenerate the binaries
+# above. Use Git LFS if the sources should be versioned.
+
+# Source 3DGS captures, ~80 MB for the nine layers. See assets/captures/README.md.
+/assets/captures/cleanply/
+
+# Source CAD, ~233 MB. See assets/cad/README.md.
+/assets/cad/*.blend
+/assets/cad/*.blend[0-9]
+
+# Per-layer clouds, ~10 MB. build-layers.mjs writes these on its way to packing
+# layers-splats.bin, which is the only one the site fetches. The manifest beside
+# them is NOT ignored — `build-layers.mjs --index-only` reads it back.
+/public/models/layers/*.bin
+
+# Python bytecode from the Blender-side build scripts.
+__pycache__/

@@ -46,6 +46,26 @@ if (!inPath || !outPath) {
 const isPly = inPath.toLowerCase().endsWith('.ply');
 const upAxis = (flags.up || (isPly ? 'y' : 'z')).toLowerCase();
 
+// The world every model is fitted into (largest span -> this many units).
+const TARGET_SIZE = 5;
+
+// --place/--frame: see placeInto(). Both must be given, or neither.
+function vec4(s, name) {
+  if (s === undefined) return null;
+  const v = s.split(',').map(Number);
+  if (v.length !== 4 || v.some((n) => !Number.isFinite(n))) {
+    console.error(`--${name} needs 4 numbers, got "${s}"`);
+    process.exit(1);
+  }
+  return v;
+}
+const place = vec4(flags.place, 'place');
+const frame = vec4(flags.frame, 'frame');
+if (!!place !== !!frame) {
+  console.error('--place and --frame must be used together.');
+  process.exit(1);
+}
+
 // ------------------------------------------------------------- orientation
 // Build the 3x3 world transform as a real matrix (row-major rows[r][c]) so the
 // same rotation can be applied to gaussian orientations, not just centres.
@@ -139,7 +159,7 @@ function quatMul(a, b) {
 // span to a fixed world size (ignores stray floaters). Returns the scale factor
 // so gaussian sizes can be shrunk by the same amount.
 function normalise(pos, count) {
-  const targetSize = 5;
+  const targetSize = TARGET_SIZE;
   const pick = (axis) => {
     const a = new Float64Array(count);
     for (let i = 0; i < count; i++) a[i] = pos[i * 3 + axis];
@@ -156,6 +176,50 @@ function normalise(pos, count) {
     pos[i * 3 + 2] = (pos[i * 3 + 2] - pz.c) * scale;
   }
   return scale;
+}
+
+// ------------------------------------------------------------------ placement
+// Every layer capture is trained on its own camera sphere, so each one comes
+// out of nerfstudio centred at the origin at roughly the same size — run
+// normalise() on them one by one and you get nine concentric clouds, not a
+// machine. --place/--frame replace the self-fit with an explicit mapping into
+// one shared world, which is the only way the layers reassemble:
+//
+//   --place  cx,cy,cz,r     this layer's true centre + bounding radius
+//   --frame  cx,cy,cz,size  the shared world all layers land in
+//
+// Both are in the source model's own units (metres, from the Blender subject
+// metadata in assets/captures/layers.json). Returns the total scale factor.
+function placeInto(pos, count, place, frame) {
+  // Wider than normalise()'s 2..98: these captures are already de-floatered, and
+  // the measure has to approximate a true bounding box, because it is matched
+  // against Blender's exact one. Clipping the tails would inflate the scale.
+  const pick = (axis) => {
+    const a = new Float64Array(count);
+    for (let i = 0; i < count; i++) a[i] = pos[i * 3 + axis];
+    a.sort();
+    const lo = a[Math.floor(count * 0.005)];
+    const hi = a[Math.floor(count * 0.995)];
+    return { c: (lo + hi) / 2, span: hi - lo };
+  };
+  const p = [pick(0), pick(1), pick(2)];
+  // Blender computes bounding_radius as the half-diagonal magnitude of the bbox,
+  // so measure exactly that here or the two radii will not correspond.
+  const measured = Math.hypot(p[0].span / 2, p[1].span / 2, p[2].span / 2) || 1;
+  const fit = place[3] / measured; // capture units -> metres
+  const world = TARGET_SIZE / frame[3]; // metres -> the shared render world
+  // pos has already been through reorient(), so the centres — which are quoted
+  // in the source model's frame (z-up metres) — must be turned the same way.
+  // Skip this and every layer's vertical offset lands on the wrong axis, which
+  // silently parks the whole stack concentric at y=0.
+  const pc = reorient(place[0], place[1], place[2]);
+  const fc = reorient(frame[0], frame[1], frame[2]);
+  for (let i = 0; i < count; i++) {
+    for (let a = 0; a < 3; a++) {
+      pos[i * 3 + a] = ((pos[i * 3 + a] - p[a].c) * fit + pc[a] - fc[a]) * world;
+    }
+  }
+  return fit * world;
 }
 
 function writeBin(p, buf) {
@@ -343,8 +407,8 @@ function fromPly() {
     col[n * 4 + 3] = iOpacity >= 0 ? sigmoid(rd(b, iOpacity)) : 1;
   }
 
-  // Normalising the centres must shrink the gaussians by the same factor.
-  const s = normalise(pos, count);
+  // Rescaling the centres must shrink the gaussians by the same factor.
+  const s = place ? placeInto(pos, count, place, frame) : normalise(pos, count);
   for (let i = 0; i < count * 3; i++) scl[i] *= s;
 
   // Pack to the 32-byte .splat layout.
@@ -374,7 +438,7 @@ function fromPly() {
 
   let sMin = Infinity, sMax = -Infinity, sSum = 0;
   for (let i = 0; i < count * 3; i++) { const v = scl[i]; if (v < sMin) sMin = v; if (v > sMax) sMax = v; sSum += v; }
-  console.log(`PLY: ${vertexCount} gaussians, ${kept} kept (alpha>=${minAlpha}) -> ${count} splats, up=${upAxis} yaw=${(yaw * 180) / Math.PI}`);
+  console.log(`PLY: ${vertexCount} gaussians, ${kept} kept (alpha>=${minAlpha}) -> ${count} splats, up=${upAxis} yaw=${(yaw * 180) / Math.PI}${place ? ` placed at [${place.slice(0, 3)}] r=${place[3]}` : ''}`);
   console.log(`  splats -> ${splatPath} (${(out.length / 1048576).toFixed(2)} MB)`);
   console.log(`  gaussian scale: min=${sMin.toFixed(4)} mean=${(sSum / (count * 3)).toFixed(4)} max=${sMax.toFixed(4)} (world units, model spans ~5)`);
 }

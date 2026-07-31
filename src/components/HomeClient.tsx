@@ -313,9 +313,15 @@ function ContactSection() {
 export default function HomeClient() {
   const t = useTranslations();
 
-  const stages = [1, 2, 3].map((n) => ({
-    title: t(`scroll_scene.stage${n}_title`),
-    text: t(`scroll_scene.stage${n}_text`),
+  // One caption per capture in the hero's teardown, in the order the scene steps
+  // through them (00 the whole table, then each subassembly as it is removed),
+  // plus a last one for the exploded diagram the walk resolves into. The scene
+  // reports which capture is on screen, so this array is indexed by that
+  // directly — the first nine must match the capture count in
+  // public/models/layers-index.bin, and the tenth is the closing beat.
+  const stages = Array.from({ length: 10 }, (_, i) => ({
+    title: t(`scroll_scene.layer${i}_title`),
+    text: t(`scroll_scene.layer${i}_text`),
   }));
 
   return (
