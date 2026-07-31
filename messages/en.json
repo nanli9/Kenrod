@@ -32,7 +32,11 @@
     "layer8_title": "Power & Control",
     "layer8_text": "Toroidal transformer and the main board, in a shielded box slung under the deck.",
     "layer9_title": "Exploded View",
-    "layer9_text": "Every subassembly held at its own removal height. One folded steel datum, seven stacked systems, and the shell that closes over them."
+    "layer9_text": "Every subassembly held at its own removal height. One folded steel datum, seven stacked systems, and the shell that closes over them.",
+    "inspect_hint": "Select a subassembly to inspect",
+    "inspect_close": "Back to the full diagram",
+    "inspect_rail": "Subassemblies",
+    "inspect_cycle": "Scroll to step through the stack"
   },
   "products": {
     "title": "Our Products",

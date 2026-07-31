@@ -35,7 +35,12 @@ export default function Cursor() {
       my = e.clientY;
       dot.style.opacity = '1';
       ring.style.opacity = '1';
-      hovering = !!(e.target as Element | null)?.closest?.('a, button');
+      // The hero's exploded diagram is a canvas, so there is no element under the
+      // pointer for closest() to find when it is over a part. The scene raises a
+      // class on the root instead — see the inspection block in ScrollScene.
+      hovering =
+        !!(e.target as Element | null)?.closest?.('a, button') ||
+        document.documentElement.classList.contains('cursor-hot');
     };
 
     // Half-pixel quantised, and only written on change: an unconditional write

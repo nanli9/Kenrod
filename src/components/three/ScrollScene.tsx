@@ -82,20 +82,73 @@ const PIXEL_BUDGET_MOBILE = 1_100_000;
 const DPR_CAP_DESKTOP = 2;
 const DPR_CAP_MOBILE = 1.75;
 
-function baseDpr() {
+// The closing diagram gets its own, far larger budget, because it is not the
+// pass any of the above was measured on. Everything in that block is about
+// alpha-blended gaussians many layers deep; the CAD is opaque geometry with
+// early-z, one draw call a shape — and by the time it owns the frame the splat
+// mesh is not drawn at all (see splatsGone). Charging a fill-rate budget to a
+// pass that is not fill-bound, in exchange for nothing, is what the desktop
+// number was doing here.
+//
+// And it was not a small tax. On a 1440x900 CSS box at devicePixelRatio 2 the
+// old budget resolves to 1.21, so the diagram rendered at 1742x1089 and the
+// browser upscaled it onto 2880x1800 of real pixels — under half the display's
+// resolution, on the one beat of the page made of hard silhouettes and
+// perforated plate.
+//
+// The aliasing was only half of what that cost. The fragment shader's specular
+// antialiasing widens roughness by the SCREEN-SPACE variance of the normal, and
+// on geometry this dense that term saturates its own clamp across most of the
+// model at low resolution — so every chrome bearing and brushed plate was being
+// forced to roughness ~0.7 and drawn as matte plastic. Resolution is the lever
+// for both: variance falls with the square of it.
+//
+// Sized against MSAA, which did not exist when this number was first chosen.
+//
+// It was 4.8 Mpx — near-native on a dpr-2 laptop — because at the time raising
+// resolution was the ONLY lever against the aliasing. DiagramMsaa is a second
+// lever on the same problem, and running both at full tilt is paying twice for
+// one thing. Measured on an AMD Renoir iGPU at 1440x900 dpr 2, GPU time for a
+// frame of the held diagram (EXT_disjoint_timer_query, median of ~70 frames):
+//
+//   4.8 Mpx  4x MSAA   5.4 ms     <- what both levers at full tilt cost
+//   4.8 Mpx  no MSAA   1.8 ms        so multisampling alone is 3.6 ms of it
+//   3.4 Mpx  4x MSAA   4.3 ms     <- here
+//   2.6 Mpx  4x MSAA   3.5 ms
+//   1.9 Mpx  4x MSAA   3.0 ms
+//
+// The multisample cost is per PIXEL — clear four samples, resolve four samples —
+// so it scales with this number, and buying resolution buys it four times over.
+// 3.4 Mpx is 0.81x native on that panel: against the 4.8 Mpx frame, mean gradient
+// magnitude over a detail crop falls 4% (5.70 -> 5.48, i.e. that much softer) for
+// 33% of the frame back. Dropping MSAA instead would be cheaper still and is the
+// wrong trade — it is the one that puts the stair-steps back.
+//
+// Still a budget rather than "just use devicePixelRatio" for the 4K panel the
+// note above was measured on, where native is 12.9 Mpx and no amount of early-z
+// makes a million triangles free. Phones are unaffected — they already sit at
+// their cap. And the governor rides on top: its rungs land this at 2.9 / 2.4 /
+// 2.0 Mpx, and drop the sample count before either.
+const PIXEL_BUDGET_DIAGRAM = 3_400_000;
+
+function baseDpr(diagram = false) {
   if (typeof window === 'undefined') return 1;
   const w = window.innerWidth;
   const h = window.innerHeight;
   const small = w < 820;
   const cap = Math.min(window.devicePixelRatio || 1, small ? DPR_CAP_MOBILE : DPR_CAP_DESKTOP);
-  const budget = small ? PIXEL_BUDGET_MOBILE : PIXEL_BUDGET_DESKTOP;
+  const budget = small
+    ? PIXEL_BUDGET_MOBILE
+    : diagram
+      ? PIXEL_BUDGET_DIAGRAM
+      : PIXEL_BUDGET_DESKTOP;
   const fit = Math.sqrt(budget / Math.max(1, w * h));
   return Math.min(cap, Math.max(1, fit));
 }
 
 // How tall the hero scrolls. Everything below is a SHARE of this, so the only
 // way to give a beat more room in absolute terms is here.
-const HERO_VH = 820;
+const HERO_VH = 940;
 
 // Scroll budget: what share of the scrolled page each beat gets. These must sum
 // to 1, and every progress constant below is derived from them. Written this way
@@ -105,19 +158,32 @@ const HERO_VH = 820;
 // into the table ate 30% of the page (122vh) while each of the nine captures
 // got 22vh, less than a mouse-wheel flick per subassembly.
 //
-// At HERO_VH = 820 (720vh of actual scrolling) this is:
+// At HERO_VH = 940 (840vh of actual scrolling) this is:
 //   word    61vh   the lockup, held readable
 //   morph   72vh   lockup -> assembled table (was 122vh; it is one transition,
 //                  it does not deserve more room than four subassemblies)
 //   table   54vh   the whole machine, before it comes apart
 //   walk   468vh   the teardown: nine captures -> 52vh each, half hold, half
 //                  removal
-//   finale  65vh   the parts settle into the exploded diagram and it is held
-const B_WORD = 0.085;
-const B_MORPH = 0.1;
-const B_TABLE = 0.075;
-const B_WALK = 0.65;
-const B_FINALE = 0.09;
+//   finale  65vh   the parts settle into the exploded diagram
+//   hold   120vh   the diagram is finished and NOTHING animates
+//
+// The hold is the beat the inspection interaction lives in, and it is a beat
+// rather than a scroll lock on purpose. The diagram used to be the last 65vh of
+// the page and every one of those pixels was still landing parts — there was no
+// moment where it sat still, which is exactly the moment a visitor needs in
+// order to notice they can point at it. 120vh of scroll where the scene is a
+// constant gives them that without taking the wheel away: scrolling still
+// leaves the hero, it just passes through a room on the way out.
+//
+// The five original shares were scaled by 720/840 so every earlier beat keeps
+// the SAME absolute height it was tuned at; only the page got longer.
+const B_WORD = 0.073;
+const B_MORPH = 0.086;
+const B_TABLE = 0.064;
+const B_WALK = 0.557;
+const B_FINALE = 0.077;
+const B_HOLD = 0.143;
 
 // Scroll maps onto [ASSEMBLE_END, 1]: the assembly beat is an entrance animation,
 // not a scroll beat — at rest the page shows the formed word, never raw scatter.
@@ -411,6 +477,75 @@ const FINALE_HANDOVER = 0.42;
 // it from CAD instead deletes that problem rather than managing it: 128k
 // triangles, one draw call a layer, and the walk's splat span never has to grow
 // past the two captures it already holds.
+//
+// Where the landing finishes. Everything past this is the hold beat, and the
+// distinction has to be explicit: `fe` used to be measured against the end of the
+// PAGE, so adding a hold beat would silently have stretched a 65vh landing into a
+// 185vh one instead of leaving the diagram alone at the end of it.
+const FINALE_END = SEQ_END + SCROLL_SPAN * B_FINALE;
+
+// ------------------------------------------------------------- inspection
+// The hold beat is interactive: hovering a subassembly lights it and drops the
+// other seven back, and clicking one isolates it, flies it to the middle of the
+// frame and hands it to the pointer to turn.
+//
+// Picking is a ray against eight BOXES, not against the geometry. The diagram is
+// 1.07M distinct triangles across 120 instanced shapes and a per-triangle raycast
+// of that on every pointer move is not affordable — but it is also not needed,
+// because the whole point of an exploded diagram is that the parts are pulled
+// apart until nothing overlaps anything. Eight disjoint boxes on one axis is an
+// exact description of that, and a box is a SUPERSET of the disc inside it, so
+// pointing at the empty corner beside the turntable still picks the turntable.
+// That reads as forgiving rather than as a miss.
+const INSPECT_AT = 0.98; // `fe` past which the diagram accepts a pointer
+// How fast the isolation blend and the orbit follow. Both are dampings per
+// second, not per frame — see damp().
+const FOCUS_RATE = 6;
+const ORBIT_RATE = 9;
+// Ceiling on the focus zoom, as a MULTIPLE of the whole-diagram framing rather
+// than an absolute scale. The layers differ by 3x in radius (the cabinet is the
+// whole table, the electronics box is a third of it), so an absolute cap would
+// either crop the big ones or leave the small ones tiny — and it would silently
+// mean something different the first time FINALE_SPAN or the CAD bounds change.
+const FOCUS_GAIN_MAX = 3;
+// Radians per pixel of drag, and the pitch stop. Pitch is clamped because there
+// is no floor and no sky in this scene: turned past about a third of a turn the
+// part is lit from underneath by a rig that assumes it never would be.
+const ORBIT_PER_PX = 0.006;
+// A quarter turn each way, which is as far as pitch has anywhere to go: at the
+// stops you are looking at the part from straight above and from straight
+// underneath. Yaw is not clamped at all. Together that is every angle there is,
+// and it is affordable because the isolated framing is fitted to a BOUNDING
+// SPHERE — see fitR. A sphere is the only bound that is invariant under all of
+// it, so nothing can be turned out of frame and, just as importantly, nothing
+// rescales while it is being turned.
+//
+// The first version fitted the projected extents over a narrow pitch range
+// instead. That framed each part slightly larger at rest, and it is the wrong
+// trade twice over: it caps the drag at a token 26 degrees, and outside the
+// range it was sized for the part grows and shrinks under the visitor's own
+// hand, which reads as the page fighting them.
+const ORBIT_PITCH_MAX = Math.PI / 2;
+// A drag has to travel this far (CSS px) before the pointerup stops counting as a
+// click. Below it a shaky hand still selects what it was pointing at.
+const CLICK_SLOP = 5;
+// ------------------------------------------------------------ cycling
+// With a part open, scroll stops being page scroll and becomes the control that
+// steps through the subassemblies, wrapping at both ends. Nothing about the page
+// moves while a part is open — which is a real trap, and is why every other way
+// out is kept live and named on screen: Escape, the caption's own control, a
+// click on empty frame, and any rail entry.
+//
+// Wheel deltas are accumulated rather than acted on per event, because a
+// trackpad emits a stream of small ones for a single flick; the cooldown is what
+// stops that flick from racing through all eight.
+const CYCLE_WHEEL = 90; // accumulated deltaY for one step
+const CYCLE_SWIPE = 60; // px of vertical drag for one step
+const CYCLE_COOLDOWN_MS = 340; // ~ the isolation cross-fade, so each part lands
+// The end of the finale on the axis the spring works in (`smooth` — progress with
+// the intro's fixed share divided back out), which is what the camera dolly and
+// anything else driven off the spring rather than off `p` has to stop at.
+const DOLLY_END = (FINALE_END - ASSEMBLE_END) / SCROLL_SPAN;
 
 function lerp(a: number, b: number, t: number) {
   return a + (b - a) * t;
@@ -433,7 +568,17 @@ function smoothstep(t: number) {
 // as fast on a 120Hz display as on a 60Hz one and crawls on a 30Hz one, so the
 // hero's feel changed with whatever monitor it landed on. Rate is per second.
 function damp(x: number, target: number, rate: number, dt: number) {
-  return target + (x - target) * Math.exp(-rate * dt);
+  const v = target + (x - target) * Math.exp(-rate * dt);
+  // ARRIVE, rather than approach forever. An exponential never reaches its
+  // target: at rate 6 and a 60Hz frame it closes 9% of the remaining gap each
+  // frame, so it is still moving in the twelfth decimal place minutes later.
+  // Nothing can see that, but the idle-frame check downstream is exact — it
+  // asks whether this frame's scene is the same as last frame's — and a value
+  // that never stops changing means a diagram nobody is touching re-renders a
+  // million triangles forever. Everything damped here is either radians or
+  // world units where 1 unit is about 100 px, so this threshold is well under
+  // a hundredth of a pixel.
+  return Math.abs(v - target) < 1e-4 ? target : v;
 }
 
 // One critically damped spring drives the whole scene's scroll. Two independent
@@ -636,6 +781,13 @@ function driveScroll(d: Drive, target: number, dt: number, stamp: number) {
     d.v = 0;
   } else {
     d.p = next;
+  }
+  // And arrive when it merely creeps in, which is the case a sign change never
+  // catches: the pacing clamp can strip the overshoot that would have crossed.
+  // Progress is 0..1 over 940vh, so this is a twentieth of a pixel of scroll.
+  if (Math.abs(d.p - target) < 1e-6 && Math.abs(d.v) < 1e-5) {
+    d.p = target;
+    d.v = 0;
   }
   return d.p;
 }
@@ -1042,6 +1194,19 @@ type CadLayer = {
   radius: number;
   seatY: number; // where it parks on the explode axis
   lag: number; // its share of the bottom-up landing stagger
+  // The layer's full box in its own space, which is what the pointer is tested
+  // against. minY/maxY above are this box's Y and are kept separate because the
+  // framing has always wanted them on their own.
+  box: THREE.Box3;
+  // The layer's reach from the explode axis, over every yaw. The framing of an
+  // isolated part is fitted to this rather than to the box above — see the note
+  // in buildGroup for why the box is the wrong bound for a stack of discs.
+  planR: number;
+  // Live interaction state, mutated by the frame loop. Kept on the layer rather
+  // than in a parallel array so there is exactly one thing to keep in step, and
+  // damped rather than set so hover does not pop.
+  hot: number; // 0..1 highlight
+  alpha: number; // 0..1 isolation opacity, independent of the landing fade
 };
 
 // Physically based CAD on a near-black page, shaded to match the project's own
@@ -1130,6 +1295,14 @@ uniform float uFade;
 uniform float uExposure;
 uniform float uAmbient;
 uniform float uAo;
+// Inspection state for this layer. uHot is the hover lift, uDim is how far the
+// layer has been pushed behind whichever one the pointer is on. Both are
+// UNIFORMS PER LAYER, which is the whole reason this beat could be made
+// interactive cheaply: the diagram already draws one material per layer, so
+// lighting one subassembly and dropping the other seven is eight uniform writes
+// a frame and not one extra draw call, shader variant or render target.
+uniform float uHot;
+uniform float uDim;
 out vec4 outColor;
 
 const float PI = 3.14159265359;
@@ -1269,7 +1442,19 @@ void main() {
   vec3 dny = dFdy(n);
   float variance = 0.5 * (dot(dnx, dnx) + dot(dny, dny));
   float a = rough * rough;
-  a = min(1.0, sqrt(a * a + min(2.0 * variance, 0.25)));
+  // The ceiling on how much roughness this may ADD, in alpha-squared. It was
+  // 0.25, which is not a widening but a demolition: it lets alpha reach 0.5,
+  // i.e. roughness 0.71, and this machine is dense enough — perforated tracks,
+  // rings of small rollers, gear teeth — that the variance term saturates over
+  // most of the model at anything short of full display resolution. Every metal
+  // in the diagram was therefore being drawn at plaster roughness, which is
+  // exactly the "no specular anywhere" the closing shot had.
+  //
+  // 0.045 is the usual working range for this approximation and still covers
+  // what it is for: a chrome bearing at roughness 0.06 has alpha 0.0036, so the
+  // floor this imposes is alpha 0.21 — a highlight a couple of pixels across
+  // instead of a sub-pixel one that strobes as the diagram turns.
+  a = min(1.0, sqrt(a * a + min(2.0 * variance, 0.045)));
 
   vec3 albedo = vColor * (1.0 - metal);
   vec3 f0 = mix(vec3(0.04), vColor, metal);
@@ -1314,7 +1499,32 @@ void main() {
   amb += sky(reflect(-v, n)) * envBRDF(f0, rough, NoV);
   lit += amb * uAmbient * ao;
 
-  outColor = vec4(encodeSrgb(agx(lit * uExposure)) * uFade, uFade);
+  // Hover and dim are applied as EXPOSURE, before the tone map, because that is
+  // the only place they can be applied without lying about the material. AgX
+  // rolls bright saturated channels toward white, so a part lit a stop harder
+  // gains highlight rather than gaining paint, and one dropped two stops loses
+  // its specular before it loses its colour — which is how a real part behaves
+  // when you move a light, and is why this reads as focus rather than as a
+  // brightness slider.
+  vec3 col = encodeSrgb(agx(lit * uExposure * mix(1.0, 1.22, uHot) * mix(1.0, 0.2, uDim)));
+
+  // Dimming also desaturates. Exposure alone was not enough separation on the
+  // layers that are mostly one saturated colour — the felt green turntable stayed
+  // the loudest thing on screen even two stops down, because AgX is protecting
+  // exactly that primary on purpose.
+  float grey = dot(col, vec3(0.2126, 0.7152, 0.0722));
+  col = mix(col, vec3(grey), uDim * 0.72);
+
+  // The hover accent: a fresnel rim in the site's acid, added in DISPLAY space
+  // after the tone map. Deliberately not fed through agx() as if it were light —
+  // it is not light, it is the interface pointing at something, and pushing it
+  // through the transform would drag it toward white and land it as a wash
+  // instead of an edge.
+  float rim = 1.0 - NoV;
+  rim *= rim * rim;
+  col += vec3(0.776, 1.0, 0.0) * rim * uHot * 0.85;
+
+  outColor = vec4(col * uFade, uFade);
 }
 `;
 
@@ -1328,6 +1538,8 @@ function cadMaterial() {
       uExposure: { value: CAD_EXPOSURE },
       uAmbient: { value: CAD_AMBIENT },
       uAo: { value: CAD_AO },
+      uHot: { value: 0 },
+      uDim: { value: 0 },
     },
     vertexShader: CAD_VERT,
     fragmentShader: CAD_FRAG,
@@ -1416,7 +1628,9 @@ function parseCadLayers(ab: ArrayBuffer, indexAb: ArrayBuffer): CadLayer[] | nul
   // compact one; the GPU gets float positions and normals, because unpacking
   // octahedral normals per vertex in the shader would cost more than the bytes it
   // saves in VRAM.
-  function buildGroup(gi: number): { geo: THREE.BufferGeometry; mats: Float32Array } | null {
+  function buildGroup(
+    gi: number
+  ): { geo: THREE.BufferGeometry; mats: Float32Array; planR: number } | null {
     const o = groupBase + gi * CAD_GROUP_REC;
     const vbase = iv.getUint32(o, true);
     const nverts = iv.getUint32(o + 4, true);
@@ -1501,7 +1715,51 @@ function parseCadLayers(ab: ArrayBuffer, indexAb: ArrayBuffer): CadLayer[] | nul
       }
       m[15] = 1;
     }
-    return { geo, mats };
+
+    // How far this shape reaches from the explode axis, at any yaw. Needed
+    // because the isolated framing has to be rotation-invariant (see fitHalfW),
+    // and neither box that is already to hand is a usable bound for that: the
+    // LAYER's box is square around a stack of DISCS, so its corner is 1.41x the
+    // true radius, and the per-shape box corner is not much better on the curved
+    // tracks and rings this machine is mostly made of. Fitted to either, an
+    // isolated part came out a third smaller than the frame could hold.
+    //
+    // So: a bounding SPHERE per shape, which is one extra pass over vertices that
+    // are already in cache from the dequantise above, and is measured once per
+    // shape rather than once per instance — the four-fold symmetry means that is
+    // a quarter of the work. Through a similarity (which every transform in this
+    // assembly was verified to be) a sphere stays a sphere, so each instance
+    // costs one transform and one scale.
+    let cx = 0;
+    let cy = 0;
+    let cz = 0;
+    for (let v = 0; v < nverts; v++) {
+      cx += pos[v * 3];
+      cy += pos[v * 3 + 1];
+      cz += pos[v * 3 + 2];
+    }
+    const inv = nverts > 0 ? 1 / nverts : 0;
+    cx *= inv;
+    cy *= inv;
+    cz *= inv;
+    let r2 = 0;
+    for (let v = 0; v < nverts; v++) {
+      const dx = pos[v * 3] - cx;
+      const dy = pos[v * 3 + 1] - cy;
+      const dz = pos[v * 3 + 2] - cz;
+      r2 = Math.max(r2, dx * dx + dy * dy + dz * dz);
+    }
+    const rad = Math.sqrt(r2);
+
+    let planR = 0;
+    for (let k = 0; k < ninst; k++) {
+      const m = mats.subarray(k * 16, k * 16 + 16);
+      const wx = m[0] * cx + m[4] * cy + m[8] * cz + m[12];
+      const wz = m[2] * cx + m[6] * cy + m[10] * cz + m[14];
+      const scale = Math.hypot(m[0], m[1], m[2]);
+      planR = Math.max(planR, Math.hypot(wx, wz) + rad * scale);
+    }
+    return { geo, mats, planR };
   }
 
   const layers: {
@@ -1543,9 +1801,11 @@ function parseCadLayers(ab: ArrayBuffer, indexAb: ArrayBuffer): CadLayer[] | nul
     root.visible = false;
     const meshes: THREE.InstancedMesh[] = [];
     const geometries: THREE.BufferGeometry[] = [];
+    let planR = 0;
     for (let gi = r.gbase; gi < r.gbase + r.ngroups; gi++) {
       const built = buildGroup(gi);
       if (!built) return null;
+      planR = Math.max(planR, built.planR);
       const ninst = built.mats.length / 16;
       const im = new THREE.InstancedMesh(built.geo, material, ninst);
       im.instanceMatrix = new THREE.InstancedBufferAttribute(built.mats, 16);
@@ -1583,6 +1843,13 @@ function parseCadLayers(ab: ArrayBuffer, indexAb: ArrayBuffer): CadLayer[] | nul
       radius: Math.max(0.001, (r.hi[0] - r.lo[0]) / 2, (r.hi[1] - r.lo[1]) / 2),
       seatY: t * FINALE_SPAN,
       lag: t,
+      box: new THREE.Box3(
+        new THREE.Vector3(r.lo[0], r.lo[1], r.lo[2]),
+        new THREE.Vector3(r.hi[0], r.hi[1], r.hi[2])
+      ),
+      planR: Math.max(0.001, planR),
+      hot: 0,
+      alpha: 1,
     });
   }
   return out;
@@ -2408,18 +2675,50 @@ function SplatCloud({
   text,
   progressRef,
   reserveRef,
+  reserveRightRef,
   drive,
+  idle,
   onReady,
   onLayer,
   onQuality,
+  selectRef,
+  hoverRef,
+  onHover,
+  onSelect,
+  onInspectable,
+  onDiagram,
 }: {
   text: string;
   progressRef: React.RefObject<number>;
   // Pixels of the left edge the caption column claims, or 0 when it is not beside
   // the model. Measured in the DOM; see CAPTION_GUTTER.
   reserveRef: React.RefObject<number>;
+  // Its mirror on the right: pixels the subassembly rail claims off the right
+  // edge. Only bites while a part is isolated — see the corridor calculation.
+  reserveRightRef: React.RefObject<number>;
   drive: React.RefObject<Drive>;
+  // Whether the closing diagram is a still picture this frame, and the hash that
+  // decides it. Written here, read by DiagramMsaa — see the Idle type.
+  idle: React.RefObject<Idle>;
   onReady?: () => void;
+  // Inspection, in the same shape as the pacing above: the SCENE finds what the
+  // pointer is on (it owns the boxes and the matrices), the HOST owns what is
+  // selected (the layer rail has to be able to select too, and a keyboard has to
+  // be able to reach it). So selection travels down as a ref — read every frame,
+  // never a re-render — and travels up as a callback.
+  selectRef: React.RefObject<number>;
+  // Hover driven from OUTSIDE the canvas — the layer rail. Used only when the
+  // ray hits nothing, which is exactly the case where the pointer is off the
+  // canvas and on the rail, so the two can never fight over the same frame.
+  hoverRef: React.RefObject<number>;
+  onHover?: (i: number) => void;
+  onSelect?: (i: number) => void;
+  // Whether the diagram is currently accepting a pointer at all, so the host can
+  // show the prompt and the rail only when they mean something.
+  onInspectable?: (v: boolean) => void;
+  // Whether the CAD diagram owns the frame, so the host can hand it the render
+  // scale the splat budget was holding back. See PIXEL_BUDGET_DIAGRAM.
+  onDiagram?: (v: boolean) => void;
   // Which capture is on screen, reported only when it changes. The caption is
   // driven from this rather than recomputed from scroll: the scene runs on the
   // spring-smoothed progress, so deriving the index a second time from raw
@@ -2441,7 +2740,101 @@ function SplatCloud({
   // The closing diagram's geometry. Independent of the splat cloud and optional:
   // if it does not load the hero simply ends on the walk.
   const [cad, setCad] = useState<CadLayer[] | null>(null);
-  const { size, camera } = useThree();
+  const { size, camera, gl, scene } = useThree();
+
+  // Getting the diagram onto the GPU BEFORE the beat that needs it.
+  //
+  // Measured wheel-scrolling through the handover on an AMD Renoir iGPU: three
+  // 67 ms frames and two 50 ms ones, 4.2% of frames missing vsync, and in the
+  // same window 721 bufferData calls totalling 19.3 MB plus a linkProgram. That
+  // is the entire CAD dataset — 120 shapes x (position, normal, colour, mra,
+  // index, instance matrices) — uploading on the single frame it is first drawn,
+  // with the shader compiling beside it. Everything downstream of that frame was
+  // already cheap; the stall was the arrival itself.
+  //
+  // So the buffers are uploaded ahead of time, by drawing each shape into a 1x1
+  // render target — the only way to make WebGL commit a buffer without also
+  // rasterising it.
+  //
+  // Paced by BYTES rather than by shapes, because the shapes are nothing like
+  // the same size: the cabinet is four of them and the wall builder is 37, so a
+  // shape a frame spends 120 frames and still lands most of the megabytes in a
+  // handful of them. A flat budget finishes the whole 19 MB in about half a
+  // second of walking, which is what it takes to still be ahead of a visitor who
+  // arrives in a hurry.
+  const WARM_BYTES = 600_000;
+  const warm = useRef({ shape: 0, rt: null as THREE.WebGLRenderTarget | null, done: false });
+  useEffect(
+    () => () => {
+      warm.current.rt?.dispose();
+      warm.current.rt = null;
+    },
+    []
+  );
+  // The program is the other half and does not need a draw at all: compile()
+  // walks the scene with traverse(), not traverseVisible(), so it reaches the
+  // diagram while it is still hidden, and compileAsync hands the link to
+  // KHR_parallel_shader_compile where the driver has it.
+  useEffect(() => {
+    if (!cad) return;
+    try {
+      if (typeof gl.compileAsync === 'function') void gl.compileAsync(scene, camera);
+      else gl.compile(scene, camera);
+    } catch {
+      // A warm-up that cannot run is not a failure — it costs the frame it was
+      // meant to save and nothing else.
+    }
+  }, [cad, gl, scene, camera]);
+
+  // Inspection state. All of it lives in refs: this runs in the frame loop and
+  // none of it may cost a React render, for the same reason the scroll overlays
+  // are written straight to the DOM — a re-render here re-renders <Canvas>, which
+  // re-reconciles the whole scene tree.
+  const inspect = useRef({
+    hot: -1, // layer the pointer is over, -1 for none
+    focus: 0, // 0..1 isolation blend, damped toward "is something selected"
+    live: false, // is the diagram accepting a pointer at this scroll position
+    diagram: false, // is the CAD the only thing drawing, i.e. can it have the pixels
+    yaw: 0, // user orbit, applied on top of the scripted rotation
+    pitch: 0,
+    yawTo: 0,
+    pitchTo: 0,
+    dragging: false,
+    // The layer the framing is currently fitted to. Held through the return
+    // flight: the moment a part is deselected `sel` is -1, and reading the
+    // framing off that would snap the fit back to the whole stack in one frame
+    // while the isolation blend was still easing out of it.
+    lastSel: -1,
+    // Damped framing for the isolated part: its radius, its own centre height and
+    // its seat. See the block that drives them for why they are not read live.
+    fitR: 0,
+    cenY: 0,
+    seat: 0,
+    // Where the current press started, so pointerup can tell a click from a drag.
+    downX: 0,
+    downY: 0,
+    lastX: 0,
+    lastY: 0,
+    moved: 0,
+    // Where the pointer is, in NDC, tracked here rather than read from r3f's
+    // state.pointer. Two reasons, both of which broke touch: state.pointer is
+    // only armed once a pointermove has been seen (see pointerLive — it exists so
+    // an untouched mouse does not dent the wordmark), and a TAP need not produce
+    // one at all, so the first tap on a phone picked nothing. And a tap's down
+    // and up can both land inside a single frame, so a click that reads whatever
+    // the last frame resolved is reading a value from before the tap happened.
+    // Owning the coordinate makes the click pick at its own position.
+    nx: 0,
+    ny: 0,
+    armed: false,
+    wantClick: false,
+    over: false,
+  });
+  const rayRef = useRef(new THREE.Raycaster());
+  const ndcRef = useRef(new THREE.Vector2());
+  const localRay = useRef(new THREE.Ray());
+  const pickMat = useRef(new THREE.Matrix4());
+  const pickPt = useRef(new THREE.Vector3());
   const gov = useRef<Governor>({
     ema: 16.7,
     seeded: false,
@@ -2476,6 +2869,112 @@ function SplatCloud({
     window.addEventListener('pointermove', arm, { once: true, passive: true });
     return () => window.removeEventListener('pointermove', arm);
   }, []);
+
+  // Pointer input for the inspection beat, bound to the canvas itself rather than
+  // routed through r3f's event system. r3f raycasts every object that carries a
+  // handler, which for this scene would mean the million-triangle diagram or a set
+  // of proxy objects living in the scene graph; the picking here is eight box
+  // tests against data the frame loop already holds, so the events only have to
+  // say WHERE and WHEN, and the loop answers WHAT.
+  useEffect(() => {
+    const el = gl.domElement;
+    const s = inspect.current;
+
+    const track = (e: PointerEvent) => {
+      const r = el.getBoundingClientRect();
+      if (r.width < 1 || r.height < 1) return;
+      s.nx = ((e.clientX - r.left) / r.width) * 2 - 1;
+      s.ny = -(((e.clientY - r.top) / r.height) * 2 - 1);
+      s.armed = true;
+      s.over = true;
+    };
+
+    const down = (e: PointerEvent) => {
+      track(e);
+      if (!s.live) return;
+      s.dragging = true;
+      s.downX = s.lastX = e.clientX;
+      s.downY = s.lastY = e.clientY;
+      s.moved = 0;
+    };
+
+    const move = (e: PointerEvent) => {
+      track(e);
+      if (!s.dragging) return;
+      const dx = e.clientX - s.lastX;
+      const dy = e.clientY - s.lastY;
+      s.lastX = e.clientX;
+      s.lastY = e.clientY;
+      s.moved = Math.max(s.moved, Math.hypot(e.clientX - s.downX, e.clientY - s.downY));
+      // Turning is offered only once a part is isolated. Before that a drag across
+      // the diagram would spin a stack the visitor has not chosen anything in yet,
+      // and the scripted yaw is still what frames it.
+      if ((selectRef.current ?? -1) < 0) return;
+
+      // Touch gets the horizontal axis and the PAGE keeps the vertical one. A
+      // finger is the same gesture for "turn this" and "scroll on", so the axis
+      // has to arbitrate: dominant-vertical is released to the page (the canvas
+      // is set to touch-action: pan-y while focused, so the browser scrolls it
+      // natively), dominant-horizontal is ours. Pitch is mouse-only for the same
+      // reason — there is no spare axis for it.
+      const touch = e.pointerType !== 'mouse';
+      if (touch && Math.abs(e.clientY - s.downY) >= Math.abs(e.clientX - s.downX)) return;
+      s.yawTo += dx * ORBIT_PER_PX;
+      if (!touch) {
+        s.pitchTo = Math.max(
+          -ORBIT_PITCH_MAX,
+          Math.min(ORBIT_PITCH_MAX, s.pitchTo + dy * ORBIT_PER_PX)
+        );
+      }
+      if (touch && e.cancelable) e.preventDefault();
+    };
+
+    // On window, not on the canvas: a drag that ends off the edge still has to
+    // release. The click itself is qualified separately — it has to have started
+    // and ended on the canvas without travelling.
+    const up = (e: PointerEvent) => {
+      if (!s.dragging) return;
+      s.dragging = false;
+      // A finger has no hover: leaving it "over" would keep the layer it last
+      // touched lit for the rest of the page.
+      if (e.pointerType !== 'mouse') s.over = false;
+      if (!s.live || s.moved > CLICK_SLOP || e.target !== el) return;
+      track(e);
+      // Deferred to the next frame rather than acting on whatever the last one
+      // resolved, so the pick happens at the coordinate this click released at
+      // and against transforms that are current. Selecting -1 for "nothing under
+      // it" is what makes clicking the empty frame the way back out of an
+      // isolated part, alongside Escape and the caption's own control.
+      s.wantClick = true;
+    };
+
+    const leave = () => {
+      s.over = false;
+    };
+    const enter = () => {
+      s.over = true;
+    };
+    const key = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && (selectRef.current ?? -1) >= 0) onSelect?.(-1);
+    };
+
+    el.addEventListener('pointerdown', down);
+    // Not passive: the touch branch above cancels the horizontal drag it claims.
+    el.addEventListener('pointermove', move, { passive: false });
+    el.addEventListener('pointerleave', leave);
+    el.addEventListener('pointerenter', enter);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('keydown', key);
+    return () => {
+      el.removeEventListener('pointerdown', down);
+      el.removeEventListener('pointermove', move);
+      el.removeEventListener('pointerleave', leave);
+      el.removeEventListener('pointerenter', enter);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('keydown', key);
+      el.style.touchAction = '';
+    };
+  }, [gl, onSelect, selectRef]);
 
   useEffect(() => {
     let cancelled = false;
@@ -2624,13 +3123,29 @@ function SplatCloud({
     let radius = 0;
     const cp = Math.cos(FINALE_PITCH);
     const sp = Math.sin(FINALE_PITCH);
+    // One radius per layer, for when that layer is isolated and the framing has
+    // to fit it instead of the stack.
+    const per: { fitR: number }[] = [];
     for (const r of cad) {
+      // Framing radius for the ISOLATED state: a bounding SPHERE about the
+      // layer's own centre, which is the one bound a freely rotated part cannot
+      // escape. Fit to it and the part is framed identically at every angle — it
+      // can never be turned out of frame, and it never rescales while it is being
+      // turned. Both matter more than the few percent of size a tighter,
+      // orientation-dependent bound would buy at rest.
+      //
+      // planR is the reach from the explode axis and hy is half the height about
+      // the box centre, so a sphere of hypot(planR, hy) centred there contains
+      // the layer.
+      const hy = (r.box.max.y - r.box.min.y) / 2;
+      const fitR = Math.hypot(r.planR, hy);
       // Measured up the SCREEN, which is the axis the seats are laid out on. A
       // part contributes its own height foreshortened by the tilt plus the share
       // of its width the tilt swings into vertical — a flat disc like the
       // turntable is almost all of the second term.
       const half = ((r.maxY - r.minY) / 2) * cp + r.radius * sp;
       const mid = r.centreY * cp + r.seatY;
+      per.push({ fitR: Math.max(0.001, fitR) });
       lo = Math.min(lo, mid - half);
       hi = Math.max(hi, mid + half);
       radius = Math.max(radius, r.radius);
@@ -2640,6 +3155,7 @@ function SplatCloud({
       centreY: (lo + hi) / 2,
       halfH: Math.max(0.001, (hi - lo) / 2),
       radius: Math.max(0.001, radius),
+      per,
     };
   }, [cad]);
 
@@ -2794,16 +3310,109 @@ function SplatCloud({
     // pure function of progress — an accumulator left the word mirrored after
     // scrolling back up.
     const rf = smoothstep(clamp01((p - MORPH_START) / (MORPH_END - MORPH_START)));
-    const spinModel = clamp01((p - MORPH_END) / (1 - MORPH_END));
+    // Both of these are measured against FINALE_END, not against the end of the
+    // page. Everything past FINALE_END is the hold beat, and the hold beat's
+    // contract is that the scene is a CONSTANT there — a drifting yaw would not
+    // only break that, it would make the thing you are trying to point at move
+    // while you point at it.
+    const spinModel = clamp01((p - MORPH_END) / (FINALE_END - MORPH_END));
     // How far into the closing diagram we are. Drives the framing, the tilt and
     // the wide-shot LOD; the per-layer landing is staggered off it below.
-    const fe = data.layers ? smoothstep(clamp01((p - SEQ_END) / (1 - SEQ_END))) : 0;
+    const fe = data.layers ? smoothstep(clamp01((p - SEQ_END) / (FINALE_END - SEQ_END))) : 0;
+
+    // ------------------------------------------------------------ inspection
+    const ins = inspect.current;
+    const dtc = Math.min(delta, 0.1);
+    // The diagram accepts a pointer once it has finished assembling itself, and
+    // stops the moment scrolling back up starts taking it apart again. Purely a
+    // function of scroll, like everything else here, so there is no state to get
+    // stuck: scrolling away releases the selection on the way past.
+    const pickable = !!cad && fe >= INSPECT_AT && intro.current >= 1;
+    if (pickable !== ins.live) {
+      ins.live = pickable;
+      onInspectable?.(pickable);
+      if (!pickable && (selectRef.current ?? -1) >= 0) onSelect?.(-1);
+    }
+    // The render scale the diagram gets is a different number from the one the
+    // splats get, and switching it reallocates the drawing buffer — so the two
+    // thresholds are deliberately far apart. On at the handover, where the splat
+    // mesh stops being drawn at all; off only once the walk is properly back.
+    // Scrubbing across a single threshold would otherwise resize the canvas on
+    // every frame of the scrub.
+    //
+    // Between the two thresholds the splats are drawn at the diagram's render
+    // scale, which leaves uMaxAxis — a cap in BACKING-STORE pixels, so it rides
+    // the governor's rung but not this — clamping each gaussian's extent a little
+    // tighter than it was calibrated for. It is deliberately left alone: that
+    // window is the tail of the cross-dissolve, where uSplatOut has already taken
+    // the whole cloud most of the way to zero alpha.
+    if (cad) {
+      const owns = ins.diagram ? fe > 0.15 : fe >= FINALE_HANDOVER;
+      if (owns !== ins.diagram) {
+        ins.diagram = owns;
+        onDiagram?.(owns);
+      }
+    }
+    if (!pickable && ins.hot >= 0) {
+      ins.hot = -1;
+      onHover?.(-1);
+    }
+
+    const sel = pickable ? (selectRef.current ?? -1) : -1;
+    // Reduced motion gets the same states, reached by a cut rather than a flight.
+    // A part sailing across the frame and scaling up is precisely the kind of
+    // large unprompted movement the preference is asking us not to make.
+    const focRate = reducedMotion.current ? 60 : FOCUS_RATE;
+    ins.focus = damp(ins.focus, sel >= 0 ? 1 : 0, focRate, dtc);
+    const foc = ins.focus;
+    // Orbit decays back to the scripted framing as the isolation lets go, so
+    // returning to the diagram and picking a second part starts it square rather
+    // than wherever the last one was left.
+    if (sel < 0) {
+      ins.yawTo *= Math.exp(-FOCUS_RATE * dtc);
+      ins.pitchTo *= Math.exp(-FOCUS_RATE * dtc);
+    }
+    ins.yaw = damp(ins.yaw, ins.yawTo, ORBIT_RATE, dtc);
+    ins.pitch = damp(ins.pitch, ins.pitchTo, ORBIT_RATE, dtc);
+    if (sel >= 0) ins.lastSel = sel;
+    else if (foc < 0.002) ins.lastSel = -1;
+    // The subject the framing is fitted to while the isolation is up. Null both
+    // before anything is picked and after the return flight has landed, which is
+    // exactly when the stack's own framing is the right one.
+    const focGeo =
+      finale && ins.lastSel >= 0 && foc > 0.002 ? (finale.per[ins.lastSel] ?? null) : null;
+    const focLayer = focGeo && cad ? (cad[ins.lastSel] ?? null) : null;
+    // The framing of the isolated part, damped rather than read straight off the
+    // selection — because scrolling now steps from one part to the next without
+    // ever closing, and the parts differ by 3x in size and sit metres apart on
+    // the explode axis. Taken live, every step would cut the scale and the
+    // centring in one frame; damped, the frame travels to the next part while it
+    // fades up, which is what makes the walk through the stack read as one move.
+    //
+    // Radius and seat are damped; the PITCH they are combined with below is not.
+    // The fit must not move while the visitor turns a part, but the centring must
+    // — tipping a part a quarter turn otherwise slides it off the middle of the
+    // frame by its own half-height.
+    if (focGeo && focLayer) {
+      if (ins.fitR <= 0) {
+        ins.fitR = focGeo.fitR;
+        ins.cenY = focLayer.centreY;
+        ins.seat = focLayer.seatY;
+      } else {
+        ins.fitR = damp(ins.fitR, focGeo.fitR, focRate, dtc);
+        ins.cenY = damp(ins.cenY, focLayer.centreY, focRate, dtc);
+        ins.seat = damp(ins.seat, focLayer.seatY, focRate, dtc);
+      }
+    } else if (foc < 0.002) {
+      ins.fitR = 0;
+    }
+
     // The walk looks down at the playfield from 43 degrees, which is right for a
     // table and wrong for a column of parts — it foreshortens the very gaps the
     // diagram exists to show. So the finale eases the camera back down to a
     // near-side-on read, and keeps turning.
-    grp.rotation.x = lerp(MODEL_PITCH * rf, FINALE_PITCH, fe);
-    grp.rotation.y = MODEL_YAW * rf + spinModel * MODEL_TURN + fe * FINALE_TURN;
+    grp.rotation.x = lerp(MODEL_PITCH * rf, FINALE_PITCH, fe) + ins.pitch * foc;
+    grp.rotation.y = MODEL_YAW * rf + spinModel * MODEL_TURN + fe * FINALE_TURN + ins.yaw * foc;
 
     // Screen-up, expressed in the group's own space — the direction a part
     // travels when it is removed, and the one the explode seats are stacked on.
@@ -2941,15 +3550,24 @@ function SplatCloud({
         bandTop = top;
         bandBottom = bottom;
         const clearHalf = Math.max(0.5, (top - bottom) / 2);
+        const halfW = halfV * (size.width / size.height);
         const diagram = Math.min(
           SEQ_ZOOM_MAX,
-          FINALE_MARGIN *
-            Math.min(
-              clearHalf / finale.halfH,
-              (halfV * (size.width / size.height)) / finale.radius
-            )
+          FINALE_MARGIN * Math.min(clearHalf / finale.halfH, halfW / finale.radius)
         );
-        fit = lerp(fit, diagram, fe);
+        // Isolating a layer refits the frame to that layer, through the same two
+        // constraints — it is the identical calculation with one part's extents
+        // instead of the whole stack's, which is what keeps the band clearance and
+        // the phone-width case honest in the focused state for free.
+        let target = diagram;
+        if (focGeo) {
+          const close = Math.min(
+            diagram * FOCUS_GAIN_MAX,
+            (FINALE_MARGIN * Math.min(clearHalf, halfW)) / ins.fitR
+          );
+          target = lerp(diagram, close, foc);
+        }
+        fit = lerp(fit, target, fe);
       }
 
       // Reserve the caption column: the horizontal counterpart of the bands above.
@@ -2989,15 +3607,33 @@ function SplatCloud({
           // machine is square in plan (0.965 x 0.965 m), so hx ~= hz and the
           // projected half-width is rad * (|cos yaw| + |sin yaw|).
           const yaw = grp.rotation.y;
-          const rad = radObj * (Math.abs(Math.cos(yaw)) + Math.abs(Math.sin(yaw)));
+          // The isolated part is the one case where the yaw correction is not an
+          // approximation but an over-estimate: fitHalfW is already the plan
+          // radius, which no yaw can exceed. Blended in with the isolation so the
+          // walk and the assembled diagram keep the behaviour they were tuned at.
+          const spread = Math.abs(Math.cos(yaw)) + Math.abs(Math.sin(yaw));
+          const rad = focGeo ? lerp(radObj * spread, ins.fitR, foc * fe) : radObj * spread;
           if (rad > 1e-6) {
+            // The corridor between the two columns of text: the caption on the
+            // left, and — once a part is isolated and big enough to reach it —
+            // the subassembly rail on the right. The rail's claim is scaled by
+            // the isolation because the assembled diagram never gets near it, and
+            // reserving width for a rail the model already clears would only
+            // shrink the closing shot for nothing.
+            const claimR = (reserveRightRef.current ?? 0) * perPxAll * foc * fe;
             // Only if the subject cannot fit the clear width even pushed hard
             // right does it have to shrink. This is what keeps the diagram as
             // large as the frame allows instead of shrinking it on principle.
-            const availHalf = Math.max(0.5, halfW - claim / 2);
+            const availHalf = Math.max(0.5, halfW - (claim + claimR) / 2);
             fit = lerp(fit, Math.min(fit, (availHalf * FINALE_MARGIN) / rad), res);
-            // Left edge sits at shiftX - rad*fit; it must clear -halfW + claim.
-            shiftX = Math.max(0, claim - halfW + rad * fit) * res;
+            // Left edge sits at shiftX - rad*fit and must clear -halfW + claim;
+            // the right edge at shiftX + rad*fit must clear halfW - claimR. Push
+            // only as far as the first demands, and never past what the second
+            // allows — the fit clamp above is what guarantees those two can both
+            // be satisfied.
+            const need = claim - halfW + rad * fit;
+            const room = halfW - claimR - rad * fit;
+            shiftX = Math.min(Math.max(0, need), Math.max(0, room)) * res;
           }
         }
       }
@@ -3007,7 +3643,15 @@ function SplatCloud({
       // computing it from the pre-clamp fit slid the stack off the band by exactly
       // the amount the clamp had just removed.
       if (finale && fe > 0) {
-        finCentre = (finale.centreY * fit - (bandTop + bandBottom) / 2) * fe;
+        // Which subject gets centred on the clear band: the whole stack, or the
+        // isolated layer flying up (or down) from its seat to take its place.
+        // This IS the flight — the part never moves in the world, the frame moves
+        // to it, so it stays registered against the seat it was picked from and
+        // the return lands it back exactly where it was.
+        const cen = focLayer
+          ? lerp(finale.centreY, ins.cenY * Math.cos(grp.rotation.x) + ins.seat, foc)
+          : finale.centreY;
+        finCentre = (cen * fit - (bandTop + bandBottom) / 2) * fe;
       }
 
       // Two centrings, blended. The walk centres each capture on its own axial
@@ -3031,8 +3675,28 @@ function SplatCloud({
     // stagger runs bottom-up, so the drawing assembles the way a hand would lay
     // the parts out: chassis first, outer shell last.
     if (cad) {
-      for (const c of cad) {
-        const fin = smoothstep(clamp01((fe - c.lag * FINALE_STAGGER) / (1 - FINALE_STAGGER)));
+      for (let ci = 0; ci < cad.length; ci++) {
+        const c = cad[ci];
+        const land = smoothstep(clamp01((fe - c.lag * FINALE_STAGGER) / (1 - FINALE_STAGGER)));
+        // Isolation rides on top of the landing fade as a second opacity, and the
+        // two multiply. Every layer is fully out of the way at sel >= 0 except the
+        // chosen one — not ghosted at 6% for context, which was the first
+        // instinct: a ghost keeps all eight layers in the TRANSPARENT pass, and
+        // the note below on early-z is the reason that costs more than it is
+        // worth on the most expensive beat of the page. The rail on the right is
+        // where the context went instead.
+        c.alpha = damp(c.alpha, sel < 0 || sel === ci ? 1 : 0, focRate, dtc);
+        // Hover is per layer and damped, so crossing a boundary is a swap rather
+        // than a flicker, and a pointer skimming across the stack does not strobe.
+        c.hot = damp(c.hot, ins.hot === ci && sel < 0 ? 1 : 0, ORBIT_RATE, dtc);
+        c.material.uniforms.uHot.value = c.hot;
+        // Everything that is not the thing being pointed at goes back. Keyed on
+        // whether ANY layer is hot rather than on this one being cold, so with the
+        // pointer off the diagram all eight sit at full strength.
+        c.material.uniforms.uDim.value =
+          sel >= 0 ? 0 : ins.hot >= 0 && ins.hot !== ci ? 1 - c.hot : 0;
+
+        const fin = land * c.alpha;
         c.root.visible = fin > 0.002;
         if (!c.root.visible) continue;
         // Blend only while this layer is actually fading. Once it is seated, hand it
@@ -3047,7 +3711,10 @@ function SplatCloud({
           c.material.transparent = !solid;
           c.material.blending = solid ? THREE.NoBlending : THREE.CustomBlending;
         }
-        c.root.position.copy(axis).multiplyScalar(c.seatY + (1 - fin) * FINALE_DROP);
+        // `land`, not `fin`: the drop is the LANDING, and folding the isolation
+        // opacity into it would send every unselected layer back up into the air
+        // on its way out instead of simply fading where it sits.
+        c.root.position.copy(axis).multiplyScalar(c.seatY + (1 - land) * FINALE_DROP);
         c.material.uniforms.uFade.value = fin;
         // The specular half of the shading needs the eye, and the camera drifts with
         // the pointer every frame. See uCamPos in the fragment shader for why three's
@@ -3062,6 +3729,77 @@ function SplatCloud({
     }
 
     grp.scale.setScalar(fit);
+
+    // ------------------------------------------------------------- picking
+    // Last, because it has to read the transforms this frame just finished
+    // writing. One frame of lag between the pointer and the highlight is well
+    // under the damping that follows it and cannot be seen.
+    if (cad) {
+      let hit = -1;
+      if (pickable && ins.armed && (ins.over || ins.wantClick) && !ins.dragging) {
+        grp.updateMatrixWorld();
+        const ray = rayRef.current;
+        ndcRef.current.set(ins.nx, ins.ny);
+        ray.setFromCamera(ndcRef.current, camera);
+        let best = Infinity;
+        for (let ci = 0; ci < cad.length; ci++) {
+          const c = cad[ci];
+          // A layer that has been faded out by the isolation is not pointable —
+          // otherwise clicking the empty frame beside an isolated part would
+          // silently select whatever invisible layer's box happens to be there.
+          if (!c.root.visible || c.alpha < 0.5) continue;
+          // Test in the LAYER'S OWN space. Transforming the box to world instead
+          // would mean re-fitting an axis-aligned box around a rotated one, and at
+          // this pitch and yaw that inflates the flat layers by half their height
+          // — enough for two neighbours in the stack to start claiming each
+          // other's pixels. The ray is three floats; the box is exact.
+          const inv = pickMat.current.copy(c.root.matrixWorld).invert();
+          const lr = localRay.current.copy(ray.ray).applyMatrix4(inv);
+          if (!lr.intersectBox(c.box, pickPt.current)) continue;
+          // Ranked by true world distance, so the near face of the near layer
+          // wins. The local hit point cannot be compared directly across layers:
+          // the group carries a scale, so local distance is in different units per
+          // frame and would rank a far layer first the moment `fit` moved.
+          const d = pickPt.current.applyMatrix4(c.root.matrixWorld).distanceTo(camera.position);
+          if (d < best) {
+            best = d;
+            hit = ci;
+          }
+        }
+      }
+      // The rail outranks the ray, and is written into the same `hot` the model
+      // uses — so hovering the rail lights the geometry and hovering the geometry
+      // lights the rail, from one value.
+      //
+      // Outranks rather than falls through because the rail only names a layer
+      // when it is explicitly pointed at or keyboard-focused, while the ray goes
+      // on reporting whatever the mouse happens to be resting on. Tabbing into
+      // the rail with the cursor abandoned over the diagram is the case: the
+      // deliberate act has to win over the idle one. Moving the pointer from the
+      // canvas to the rail is not a conflict at all — the canvas's pointerleave
+      // clears `over` and stops the ray before the rail's enter fires.
+      if (pickable) {
+        const rail = hoverRef.current ?? -1;
+        if (rail >= 0) hit = rail;
+      }
+      if (hit !== ins.hot) {
+        ins.hot = hit;
+        onHover?.(hit);
+      }
+      // The click, resolved against the pick this frame just made.
+      if (ins.wantClick) {
+        ins.wantClick = false;
+        if (pickable) onSelect?.(hit);
+      }
+      // With a part open the canvas owns BOTH touch axes: horizontal turns it,
+      // vertical steps through the stack (handled on the host, which owns the
+      // selection). Off the rest of the time, so the hero scrolls under a finger
+      // exactly as it always has on the 800-odd vh that are not this beat.
+      const wantPan = sel >= 0 ? 'none' : '';
+      if (gl.domElement.style.touchAction !== wantPan) {
+        gl.domElement.style.touchAction = wantPan;
+      }
+    }
 
     // Re-sort only when the ordering can actually have changed: the splats moved
     // (progress) or the camera did. Idle frames reuse the last order. Degraded
@@ -3129,8 +3867,11 @@ function SplatCloud({
     (mesh.geometry as THREE.InstancedBufferGeometry).instanceCount = st.drawn;
 
     // Quality governor: EMA over the real frame cadence, act with hysteresis.
-    // Skipped until the intro has played so load spikes don't trigger it.
-    if (intro.current >= 1) {
+    // Skipped until the intro has played so load spikes don't trigger it, and
+    // skipped again over frames the diagram declined to draw — those are fast
+    // because they did nothing, and feeding them to the EMA would walk the
+    // governor up a rung the device cannot hold the moment the pointer moves.
+    if (intro.current >= 1 && idle.current.drew) {
       const ms = Math.min(delta * 1000, 100);
       // Seeded from the first governed frame rather than eased up from a 16.7 ms
       // guess. At 30 fps that warm-up was ~25 frames of the EMA climbing toward
@@ -3197,6 +3938,105 @@ function SplatCloud({
         apply();
       }
     }
+
+    // ------------------------------------------------------------- warm-up
+    // One shape a frame onto the GPU, while the diagram is still nowhere near
+    // the screen. See the note on `warm` for what this is buying back.
+    const wm = warm.current;
+    if (cad && !wm.done) {
+      if (fe > 0) {
+        // Too late to be worth anything — the visitor got here first. Stand
+        // down and let the remaining shapes upload as they are drawn, which is
+        // exactly what happened before any of this existed.
+        wm.done = true;
+        wm.rt?.dispose();
+        wm.rt = null;
+      } else if (intro.current >= 1) {
+        if (!wm.rt) {
+          wm.rt = new THREE.WebGLRenderTarget(1, 1, { depthBuffer: true, stencilBuffer: false });
+        }
+        const wasSplat = mesh.visible;
+        mesh.visible = false;
+        let spent = 0;
+        // At least one a frame however big it is, so a single fat shape can
+        // never stall the queue behind it.
+        while (!wm.done && (spent === 0 || spent < WARM_BYTES)) {
+          let li = 0;
+          let si = wm.shape;
+          while (li < cad.length && si >= cad[li].meshes.length) {
+            si -= cad[li].meshes.length;
+            li++;
+          }
+          if (li >= cad.length) {
+            wm.done = true;
+            break;
+          }
+          const c = cad[li];
+          const im = c.meshes[si];
+          const g = c.geometries[si];
+          spent += (im.instanceMatrix.array as Float32Array).byteLength;
+          if (g.index) spent += (g.index.array as ArrayBufferView).byteLength;
+          for (const key in g.attributes) {
+            spent += (g.attributes[key].array as ArrayBufferView).byteLength;
+          }
+          // Visibility rather than a scene of its own: reparenting the mesh
+          // would move it out from under the group whose matrix it is drawn
+          // with, and this way the draw goes through the identical program,
+          // attribute layout and instance buffer it will use for real.
+          const wasRoot = c.root.visible;
+          c.root.visible = true;
+          for (let k = 0; k < c.meshes.length; k++) c.meshes[k].visible = k === si;
+          gl.setRenderTarget(wm.rt);
+          gl.render(scene, camera);
+          gl.setRenderTarget(null);
+          for (let k = 0; k < c.meshes.length; k++) c.meshes[k].visible = true;
+          c.root.visible = wasRoot;
+          wm.shape++;
+        }
+        mesh.visible = wasSplat;
+        if (wm.done) {
+          wm.rt.dispose();
+          wm.rt = null;
+        }
+      }
+    }
+
+    // ---------------------------------------------------------------- idle
+    // Everything that can move a pixel on the diagram beat, summed, so
+    // DiagramMsaa can tell this frame from the last one. The camera is added
+    // there rather than here — CameraRig has not run yet.
+    //
+    // Gated on the splats being GONE rather than on `fe`: uTime advances every
+    // frame and is not in this sum, so while the cloud is still drawn its
+    // simmer would be skipped over. By the time this can be true it is
+    // multiplied out to nothing and the mesh is not drawn at all.
+    const canIdle = !!cad && splatsGone && intro.current >= 1 && wm.done;
+    let sig = p * 7919 + progressRef.current * 6271 + fit * 4271;
+    sig +=
+      grp.rotation.x * 1367 +
+      grp.rotation.y * 1289 +
+      grp.position.x * 1051 +
+      grp.position.y * 1093 +
+      grp.position.z * 1129 +
+      size.width * 3 +
+      size.height * 5;
+    if (cad) {
+      for (let ci = 0; ci < cad.length; ci++) {
+        const c = cad[ci];
+        const u = c.material.uniforms;
+        sig +=
+          (ci + 1) *
+          ((c.root.visible ? 1 : 0) * 31 +
+            u.uFade.value * 337 +
+            u.uHot.value * 547 +
+            u.uDim.value * 641 +
+            c.root.position.y * 769 +
+            c.root.position.x * 811 +
+            c.root.position.z * 857);
+      }
+    }
+    idle.current.can = canIdle;
+    idle.current.sig = sig;
   });
 
   return (
@@ -3305,7 +4145,14 @@ function CameraRig({
       delta,
       state.clock.elapsedTime
     );
-    const zoom = Math.sin(clamp01(smooth) * Math.PI); // 0 -> 1 -> 0
+    // 0 -> 1 -> 0 across everything up to the end of the finale, then parked.
+    // Measured against DOLLY_END rather than against the page so the hold beat
+    // gets a camera that is genuinely still: on the raw page position this dolly
+    // was still pulling back from z 8.9 to 10 across the whole hold, which would
+    // have rescaled the very part the visitor had stopped to look at. The curve
+    // over the beats that precede it is unchanged — DOLLY_END is where the page
+    // used to end.
+    const zoom = Math.sin(clamp01(smooth / DOLLY_END) * Math.PI);
     const targetZ = 10 - zoom * 2.5;
     const dt = Math.min(delta, 0.05);
 
@@ -3318,8 +4165,251 @@ function CameraRig({
   return null;
 }
 
+// ------------------------------------------------------- multisampling
+// The closing diagram, and only the closing diagram, is drawn into a
+// multisampled buffer and blitted down.
+//
+// It cannot be done with the canvas's own `antialias` flag, which is why this
+// exists at all: that flag is fixed when the context is created, and turning it
+// on would apply MSAA to the SPLAT pass as well — hundreds of thousands of
+// alpha-blended quads, several deep, where every covered sample is a separate
+// blend. That pass is fill-rate bound already (see the pixel-budget block) and
+// is what 468vh of the page is made of. The diagram is the opposite: opaque
+// geometry, one draw call a shape, drawn on the one beat where the splats are
+// not drawn at all. So the multisampling goes where the edges are and nowhere
+// else.
+//
+// Resolution alone did not finish the job. A million triangles of CAD is mostly
+// silhouette — perforated tracks, ring gears, the lip of every disc — and those
+// are exactly the edges supersampling helps least per pixel spent.
+const BLIT_VERT = /* glsl */ `
+precision highp float;
+in vec3 position;
+out vec2 vUv;
+void main() {
+  vUv = position.xy * 0.5 + 0.5;
+  gl_Position = vec4(position.xy, 0.0, 1.0);
+}
+`;
+
+// A straight texel copy, deliberately with no colour management of any kind.
+// Every material in this scene is a RawShaderMaterial that writes its own final
+// encoded sRGB — see the note on encodeSrgb — so the buffer already holds
+// display values, and anything three would helpfully convert here would be a
+// second encode of an already-encoded image.
+const BLIT_FRAG = /* glsl */ `
+precision highp float;
+uniform sampler2D uMap;
+in vec2 vUv;
+out vec4 outColor;
+void main() {
+  outColor = texture(uMap, vUv);
+}
+`;
+
+// Sample counts by governor rung. Multisampling is the first thing to go on a
+// device that is struggling, before the render scale the rungs already own —
+// it is pure image quality with no effect on the animation, and a device that
+// cannot hold the frame rate at 4x can usually hold it at 2x.
+//
+// Rung 1 used to keep all four samples, which did not match that intent and was
+// leaving the largest single lever untouched on the first demotion: measured,
+// multisampling is about two thirds of a frame of the held diagram, more than
+// the render scale that rung 1 already drops. Halving it there is worth around
+// a millisecond and is the cheapest millisecond on the ladder.
+const MSAA_BY_LEVEL = [4, 2, 2, 0, 0];
+
+// The hold beat is a still picture that costs a million triangles and a
+// multisample resolve to produce, sixty times a second, for as long as somebody
+// leaves it on screen. Nothing on that beat animates by design — that is the
+// beat's whole contract — so once the scroll spring, the pointer parallax and
+// every damped interaction state have arrived, this frame is the last one's
+// exact twin and drawing it again buys nothing.
+//
+// So: SplatCloud sums everything that can change the picture into `sig`, and
+// DiagramMsaa declines to render when it is unchanged. Not drawing leaves the
+// canvas out of the compositor's dirty set, so the previous frame stays on
+// screen — the same mechanism r3f's own `frameloop="demand"` runs on.
+//
+// It is an EXACT comparison, which is why damp() and the scroll spring were
+// both given an arrival threshold: an exponential that only ever approaches its
+// target would keep this beat rendering forever over motion in the twelfth
+// decimal place.
+type Idle = {
+  // Whether the diagram is the only thing on screen, i.e. whether the frame
+  // really is a pure function of what `sig` covers. False everywhere else on the
+  // page, where the splat cloud simmers on a clock and nothing may be skipped.
+  can: boolean;
+  sig: number;
+  // Written by DiagramMsaa, read by the governor on the frame after: a skipped
+  // frame is fast because it did nothing, and a governor that counted it as
+  // evidence would climb a rung it cannot hold the moment the pointer moves.
+  drew: boolean;
+};
+
+function DiagramMsaa({
+  active,
+  samples,
+  idle,
+}: {
+  active: boolean;
+  samples: number;
+  idle: React.RefObject<Idle>;
+}) {
+  const { gl, scene, camera } = useThree();
+  const dbs = useRef(new THREE.Vector2());
+  const rt = useRef<THREE.WebGLRenderTarget | null>(null);
+  const lastSig = useRef(Number.NaN);
+
+  // The fullscreen triangle, not a quad: one primitive, no seam down the
+  // diagonal, and the parts of it outside the viewport cost nothing.
+  const kit = useMemo(() => {
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute(
+      'position',
+      new THREE.BufferAttribute(new Float32Array([-1, -1, 0, 3, -1, 0, -1, 3, 0]), 3)
+    );
+    const material = new THREE.RawShaderMaterial({
+      glslVersion: THREE.GLSL3,
+      uniforms: { uMap: { value: null as THREE.Texture | null } },
+      vertexShader: BLIT_VERT,
+      fragmentShader: BLIT_FRAG,
+      depthTest: false,
+      depthWrite: false,
+    });
+    const s = new THREE.Scene();
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.frustumCulled = false;
+    s.add(mesh);
+    return { geometry, material, scene: s, camera: new THREE.OrthographicCamera() };
+  }, []);
+
+  const drop = useCallback(() => {
+    rt.current?.dispose();
+    rt.current = null;
+  }, []);
+
+  // The blit is two lines of GLSL, but it is still a program that has to be
+  // linked, and left alone it links on the one frame the diagram arrives —
+  // beside everything else arriving on that frame. Traced during a scroll
+  // through the handover it was the last linkProgram left there.
+  useEffect(() => {
+    try {
+      gl.compile(kit.scene, kit.camera);
+    } catch {
+      // Same as the geometry warm-up: worth a frame if it works, nothing if not.
+    }
+  }, [gl, kit]);
+
+  // A sample count is baked into the renderbuffer, so a rung change has to build
+  // a new one rather than resize the old.
+  useEffect(() => drop(), [samples, drop]);
+
+  // Insurance for the idle check. Skipping a frame relies on the compositor
+  // still holding the last one, which is true while the page is simply sitting
+  // there and is not worth betting on across a backgrounded tab, a bfcache
+  // restore or a lost context. None of those change the scene, so none of them
+  // would change the hash — force the next frame to draw instead.
+  useEffect(() => {
+    const wake = () => {
+      lastSig.current = Number.NaN;
+    };
+    const el = gl.domElement;
+    for (const e of ['visibilitychange', 'pageshow', 'focus', 'resize'] as const) {
+      window.addEventListener(e, wake);
+    }
+    el.addEventListener('webglcontextrestored', wake);
+    return () => {
+      for (const e of ['visibilitychange', 'pageshow', 'focus', 'resize'] as const) {
+        window.removeEventListener(e, wake);
+      }
+      el.removeEventListener('webglcontextrestored', wake);
+    };
+  }, [gl]);
+  useEffect(() => {
+    return () => {
+      drop();
+      kit.geometry.dispose();
+      kit.material.dispose();
+    };
+  }, [kit, drop]);
+
+  // Priority 1: this takes rendering over from r3f entirely, so the pass-through
+  // branch below is not an optimisation, it is the only thing drawing the other
+  // 90% of the page.
+  useFrame(() => {
+    const s = gl.getDrawingBufferSize(dbs.current);
+    const w = Math.max(1, Math.floor(s.x));
+    const h = Math.max(1, Math.floor(s.y));
+
+    // Is this frame the previous one over again? The camera is folded in here
+    // rather than upstream because CameraRig subscribes after SplatCloud, so its
+    // parallax is not yet written when `sig` is summed — and priority 1 means
+    // this callback runs after every one of them.
+    const st = idle.current;
+    if (st.can) {
+      const sig =
+        st.sig +
+        camera.position.x * 911 +
+        camera.position.y * 977 +
+        camera.position.z * 1013 +
+        w * 7 +
+        h * 11 +
+        samples * 13;
+      if (sig === lastSig.current) {
+        st.drew = false;
+        return;
+      }
+      lastSig.current = sig;
+    } else {
+      lastSig.current = Number.NaN;
+    }
+    st.drew = true;
+
+    if (!active || samples < 2) {
+      if (rt.current) drop();
+      gl.setRenderTarget(null);
+      gl.render(scene, camera);
+      return;
+    }
+
+    let t = rt.current;
+    if (!t) {
+      t = new THREE.WebGLRenderTarget(w, h, {
+        samples,
+        depthBuffer: true,
+        stencilBuffer: false,
+      });
+      t.texture.colorSpace = THREE.NoColorSpace;
+      t.texture.generateMipmaps = false;
+      t.texture.minFilter = THREE.LinearFilter;
+      t.texture.magFilter = THREE.LinearFilter;
+      rt.current = t;
+    } else if (t.width !== w || t.height !== h) {
+      // Follows the DRAWING BUFFER, not the CSS box: the render scale moves under
+      // this beat (the diagram claims a budget of its own) and the governor moves
+      // it again, neither of which changes the element's size.
+      t.setSize(w, h);
+    }
+
+    gl.setRenderTarget(t);
+    gl.render(scene, camera);
+    gl.setRenderTarget(null);
+    kit.material.uniforms.uMap.value = t.texture;
+    gl.render(kit.scene, kit.camera);
+  }, 1);
+
+  return null;
+}
+
 // Sparse ambient dust for depth — barely-there ice motes, not confetti.
-function BackgroundParticles({ progressRef }: { progressRef: React.RefObject<number> }) {
+function BackgroundParticles({
+  progressRef,
+  idle,
+}: {
+  progressRef: React.RefObject<number>;
+  idle: React.RefObject<Idle>;
+}) {
   const pointsRef = useRef<THREE.Points>(null);
 
   const positions = useMemo(() => {
@@ -3334,9 +4424,16 @@ function BackgroundParticles({ progressRef }: { progressRef: React.RefObject<num
 
   useFrame((_state, delta) => {
     if (pointsRef.current) {
-      // per second, not per frame — the motes used to drift at double speed on
-      // a 120Hz display
-      pointsRef.current.rotation.y += 0.024 * Math.min(delta, 0.05);
+      // Held still on the diagram beat, along with everything else there. Not an
+      // optimisation in itself — 160 motes are free — but the idle check above
+      // is exact, and a drift nothing else matches would either keep the beat
+      // rendering forever or, if left to accumulate through skipped frames,
+      // snap the dust sideways the moment something else woke the frame up.
+      if (!idle.current.can) {
+        // per second, not per frame — the motes used to drift at double speed on
+        // a 120Hz display
+        pointsRef.current.rotation.y += 0.024 * Math.min(delta, 0.05);
+      }
       const mat = pointsRef.current.material as THREE.PointsMaterial;
       mat.opacity = lerp(0.07, 0.2, progressRef.current);
     }
@@ -3355,14 +4452,23 @@ function BackgroundParticles({ progressRef }: { progressRef: React.RefObject<num
 function Scene({
   progressRef,
   reserveRef,
+  reserveRightRef,
   drive,
   text,
   onReady,
   onLayer,
   onQuality,
+  selectRef,
+  hoverRef,
+  onHover,
+  onSelect,
+  onInspectable,
+  onDiagram,
+  msaa,
 }: {
   progressRef: React.RefObject<number>;
   reserveRef: React.RefObject<number>;
+  reserveRightRef: React.RefObject<number>;
   // Owned by ScrollScene, not created here: scroll reaches the scene through a
   // ref (so scrolling re-renders nothing), but the leash has to read the spring
   // back out from the DOM side to know how far ahead the page is allowed to be.
@@ -3371,19 +4477,40 @@ function Scene({
   onReady?: () => void;
   onLayer?: (i: number) => void;
   onQuality?: (level: number) => void;
+  selectRef: React.RefObject<number>;
+  hoverRef: React.RefObject<number>;
+  onHover?: (i: number) => void;
+  onSelect?: (i: number) => void;
+  onInspectable?: (v: boolean) => void;
+  onDiagram?: (v: boolean) => void;
+  // Multisampling for the closing diagram: whether it owns the frame, and how
+  // many samples the governor's current rung allows. See DiagramMsaa.
+  msaa: number;
 }) {
+  // Shared between the three frame loops below, never rendered into React. See
+  // the Idle type.
+  const idle = useRef<Idle>({ can: false, sig: Number.NaN, drew: true });
   return (
     <>
+      <DiagramMsaa active={msaa >= 2} samples={msaa} idle={idle} />
       <SplatCloud
+        idle={idle}
         text={text}
         progressRef={progressRef}
         reserveRef={reserveRef}
+        reserveRightRef={reserveRightRef}
         drive={drive}
         onReady={onReady}
         onLayer={onLayer}
         onQuality={onQuality}
+        selectRef={selectRef}
+        hoverRef={hoverRef}
+        onHover={onHover}
+        onSelect={onSelect}
+        onInspectable={onInspectable}
+        onDiagram={onDiagram}
       />
-      <BackgroundParticles progressRef={progressRef} />
+      <BackgroundParticles progressRef={progressRef} idle={idle} />
       <CameraRig progressRef={progressRef} drive={drive} />
     </>
   );
@@ -3392,6 +4519,7 @@ function Scene({
 export default function ScrollScene({
   hero,
   stages,
+  inspect,
 }: {
   hero: {
     title: string;
@@ -3401,6 +4529,9 @@ export default function ScrollScene({
     loading: string;
   };
   stages: { title: string; text: string }[];
+  // Copy for the hold beat: the prompt that says the diagram can be pointed at,
+  // the way back out of an open part, and the rail's accessible name.
+  inspect: { hint: string; close: string; rail: string; cycle: string };
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   // Two readings of the same scroll: the ref is exact and free (the canvas
@@ -3425,14 +4556,19 @@ export default function ScrollScene({
   // is the pixel budget, re-measured on resize so dragging the window to another
   // monitor re-fits it.
   const [quality, setQuality] = useState(0);
+  // Whether the closing diagram owns the frame. It gets a much larger pixel
+  // budget than the rest of the hero, so this is an input to the render scale
+  // rather than only a piece of presentation state — see PIXEL_BUDGET_DIAGRAM.
+  const [diagram, setDiagram] = useState(false);
   const [dprBase, setDprBase] = useState(() => baseDpr());
   const handleQuality = useCallback((level: number) => setQuality(level), []);
+  const handleDiagram = useCallback((v: boolean) => setDiagram(v), []);
   useEffect(() => {
-    const fit = () => setDprBase(baseDpr());
+    const fit = () => setDprBase(baseDpr(diagram));
     fit();
     window.addEventListener('resize', fit, { passive: true });
     return () => window.removeEventListener('resize', fit);
-  }, []);
+  }, [diagram]);
   // Same fact the frameloop is gated on, readable from the scroll handler. It
   // matters there: out of view the canvas stops and the spring FREEZES, so a
   // leash that trusted a stale `drive.p` would pin the visitor inside a hero
@@ -3443,6 +4579,118 @@ export default function ScrollScene({
   const [layer, setLayer] = useState(-1);
   const handleReady = useCallback(() => setReady(true), []);
   const handleLayer = useCallback((i: number) => setLayer(i), []);
+
+  // ------------------------------------------------------------- inspection
+  // Three pieces of state, all of them rare: which layer the pointer is on, which
+  // one is open, and whether the diagram is taking a pointer at all. The scene
+  // reads the selection through a ref (it is in the frame loop and must not be
+  // re-rendered into) and the two are kept in step by handleSelect writing both.
+  const [hovered, setHovered] = useState(-1);
+  const [opened, setOpened] = useState(-1);
+  const [inspectable, setInspectable] = useState(false);
+  const selectRef = useRef(-1);
+  const hoverRef = useRef(-1);
+  const handleHover = useCallback((i: number) => setHovered(i), []);
+  const handleSelect = useCallback((i: number) => {
+    selectRef.current = i;
+    setOpened(i);
+  }, []);
+  const handleInspectable = useCallback((v: boolean) => setInspectable(v), []);
+
+  // The subassemblies, which are the stages minus the assembled table at the
+  // front and the diagram itself at the back. Both the rail and the cycling are
+  // indexed against this.
+  const parts = useMemo(() => stages.slice(1, -1), [stages]);
+  const cycle = useCallback(
+    (dir: number) => {
+      setOpened((prev) => {
+        if (prev < 0 || parts.length < 1) return prev;
+        const next = (prev + dir + parts.length) % parts.length;
+        selectRef.current = next;
+        return next;
+      });
+    },
+    [parts.length]
+  );
+
+  // While a part is open the wheel drives the stack, not the page. Bound on
+  // window and non-passive so it can cancel the scroll wherever the pointer
+  // happens to be — the caption and the rail sit over the canvas, and a wheel
+  // event lands on whichever of them is under the cursor.
+  useEffect(() => {
+    if (opened < 0) return;
+    let acc = 0;
+    let last = 0;
+    let sx = 0;
+    let sy = 0;
+
+    const fire = (dir: number) => {
+      const now = performance.now();
+      if (now - last < CYCLE_COOLDOWN_MS) return false;
+      last = now;
+      acc = 0;
+      cycle(dir);
+      return true;
+    };
+
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      acc += e.deltaY;
+      if (Math.abs(acc) >= CYCLE_WHEEL) fire(Math.sign(acc));
+    };
+    const onTouchStart = (e: TouchEvent) => {
+      const t = e.touches[0];
+      if (!t) return;
+      sx = t.clientX;
+      sy = t.clientY;
+      acc = 0;
+    };
+    // Vertical only. A horizontal drag is the orbit's, and the canvas's own
+    // pointer handler releases the vertical axis for exactly this.
+    const onTouchMove = (e: TouchEvent) => {
+      const t = e.touches[0];
+      if (!t) return;
+      const dx = t.clientX - sx;
+      const dy = t.clientY - sy;
+      if (Math.abs(dy) <= Math.abs(dx)) return;
+      if (e.cancelable) e.preventDefault();
+      // Up-swipe reads as "further down the stack", the same direction a wheel
+      // down goes.
+      if (Math.abs(dy) >= CYCLE_SWIPE && fire(dy < 0 ? 1 : -1)) sy = t.clientY;
+    };
+    // Deliberately NOT Home/End/Space: those stay with the page, so a keyboard
+    // is never without a way out that is not Escape.
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'ArrowDown' || e.key === 'PageDown') {
+        e.preventDefault();
+        cycle(1);
+      } else if (e.key === 'ArrowUp' || e.key === 'PageUp') {
+        e.preventDefault();
+        cycle(-1);
+      }
+    };
+
+    window.addEventListener('wheel', onWheel, { passive: false });
+    window.addEventListener('touchstart', onTouchStart, { passive: true });
+    window.addEventListener('touchmove', onTouchMove, { passive: false });
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('wheel', onWheel);
+      window.removeEventListener('touchstart', onTouchStart);
+      window.removeEventListener('touchmove', onTouchMove);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [opened, cycle]);
+
+  // The custom cursor swells over anything interactive, and the diagram is now
+  // one of those things — but it is a canvas, so there is no element for
+  // Cursor.tsx's `closest('a, button')` to find. A class on the root is the
+  // cheapest channel between the two, and it costs one write per hover change.
+  useEffect(() => {
+    const on = hovered >= 0 || opened >= 0;
+    document.documentElement.classList.toggle('cursor-hot', on);
+    return () => document.documentElement.classList.remove('cursor-hot');
+  }, [hovered, opened]);
 
   // The three overlays that track scroll continuously — the hero copy's fade,
   // the rail fill, the percentage readout — written straight to the DOM instead
@@ -3477,6 +4725,12 @@ export default function ScrollScene({
   // it for nothing.
   const captionRef = useRef<HTMLDivElement>(null);
   const reserveRef = useRef(0);
+  // Its mirror on the right, and measured for the same reason: the rail's width
+  // is set by the longest subassembly name in whichever language is loaded
+  // ("Center Column & Control Dome" against "中心升降柱 / 玻璃控制盘"), so it is
+  // not a number this file can know.
+  const railRef = useRef<HTMLElement>(null);
+  const reserveRightRef = useRef(0);
   useEffect(() => {
     const measure = () => {
       const el = captionRef.current;
@@ -3484,6 +4738,17 @@ export default function ScrollScene({
       // from matchMedia rather than a hardcoded 768 so the two cannot drift.
       const beside = window.matchMedia('(min-width: 768px)').matches;
       reserveRef.current = el && beside ? el.getBoundingClientRect().right : 0;
+      // The rail's INDEX column, not the whole rail. The names fold away the
+      // moment a part is opened, which is the only state where the model is big
+      // enough to reach the right edge at all — so reserving the width they
+      // occupy the rest of the time would shrink the isolated part to clear text
+      // that is no longer there. Measured off the index rather than off the nav
+      // because the nav's own width is mid-transition exactly when this matters.
+      const idx = railRef.current?.querySelector('[data-rail-index]');
+      reserveRightRef.current =
+        idx && beside
+          ? Math.max(0, window.innerWidth - idx.getBoundingClientRect().left + CAPTION_GUTTER)
+          : 0;
     };
     measure();
     window.addEventListener('resize', measure, { passive: true });
@@ -3711,10 +4976,82 @@ export default function ScrollScene({
     return () => mq.removeEventListener('change', apply);
   }, []);
 
-  // One caption per capture, indexed by what the scene says is on screen. The
-  // old version split three captions evenly across the tail of the page from an
-  // arbitrary 0.72, which had nothing to do with what the model was showing.
-  const currentStage = layer >= 0 ? Math.min(layer, stages.length - 1) : -1;
+  // What the caption is naming. During the walk it is the capture on screen;
+  // during the hold beat it is whatever the visitor is pointing at, and an open
+  // part outranks a hovered one so the panel does not flicker to a neighbour
+  // while you reach for the close button.
+  //
+  // Layer indices are offset by one against stage indices, and always were: the
+  // CAD carries the eight SUBASSEMBLIES (01_exterior_cabinet .. 08_power) while
+  // the stages start with 00, the assembled table, which is not a layer.
+  const active = opened >= 0 ? opened : hovered;
+  const currentStage =
+    inspectable && active >= 0
+      ? Math.min(active + 1, stages.length - 1)
+      : layer >= 0
+        ? Math.min(layer, stages.length - 1)
+        : -1;
+
+  // The canvas subtree, held across every render this component makes for a
+  // reason that has nothing to do with micro-optimisation: <Canvas> re-runs r3f's
+  // configure() and re-reconciles the entire scene tree on every render of its
+  // own element, and inspection adds three new pieces of state that change while
+  // a pointer is moving. Without this, hovering across the diagram would
+  // re-reconcile the scene several times a second — see the GOV_DPR note for
+  // what that class of re-render already cost the governor. Every dependency
+  // here is either a primitive or a stable useCallback/ref.
+  const canvas = useMemo(
+    () => (
+      <Canvas
+        // near/far deliberately tight. r3f defaults to 0.1/1000, and depth
+        // resolution at the model's distance scales with the near plane — the
+        // CAD diagram is full of CAD-flush faces (a felt sheet laid exactly on
+        // the deck it covers) and every spare bit of depth buys some of them
+        // back. The camera never leaves z = 7.5..10 and nothing in the scene is
+        // more than a few units from the origin, so this range has room to
+        // spare.
+        camera={{ position: [0, 0, 10], fov: 50, near: 0.5, far: 50 }}
+        frameloop={inView ? 'always' : 'never'}
+        // A single number, never a [min, max] range: a range is resolved
+        // against window.devicePixelRatio on every <Canvas> render, which
+        // silently reverted the governor. See the GOV_DPR block.
+        dpr={dprBase * GOV_DPR[quality]}
+        gl={{ antialias: false, alpha: false, powerPreference: 'high-performance' }}
+        onCreated={({ gl }) => gl.setClearColor('#050505', 1)}
+      >
+        <Scene
+          progressRef={progressRef}
+          drive={drive}
+          text={hero.title}
+          reserveRef={reserveRef}
+          reserveRightRef={reserveRightRef}
+          onReady={handleReady}
+          onLayer={handleLayer}
+          onQuality={handleQuality}
+          selectRef={selectRef}
+          hoverRef={hoverRef}
+          onHover={handleHover}
+          onSelect={handleSelect}
+          onInspectable={handleInspectable}
+          onDiagram={handleDiagram}
+          msaa={diagram ? MSAA_BY_LEVEL[quality] : 0}
+        />
+      </Canvas>
+    ),
+    [
+      inView,
+      dprBase,
+      quality,
+      diagram,
+      hero.title,
+      handleReady,
+      handleLayer,
+      handleQuality,
+      handleHover,
+      handleSelect,
+      handleInspectable,
+    ]
+  );
 
   // Both heights come from the one constant: if the placeholder and the mounted
   // container ever disagree, the page jumps the moment hydration lands.
@@ -3733,33 +5070,7 @@ export default function ScrollScene({
           the compositor a full-screen blend), phones start at a lower render
           scale — the governor inside handles the rest. */}
       <div className="sticky top-0 h-screen w-full overflow-hidden">
-        <Canvas
-          // near/far deliberately tight. r3f defaults to 0.1/1000, and depth
-          // resolution at the model's distance scales with the near plane — the
-          // CAD diagram is full of CAD-flush faces (a felt sheet laid exactly on
-          // the deck it covers) and every spare bit of depth buys some of them
-          // back. The camera never leaves z = 7.5..10 and nothing in the scene is
-          // more than a few units from the origin, so this range has room to
-          // spare.
-          camera={{ position: [0, 0, 10], fov: 50, near: 0.5, far: 50 }}
-          frameloop={inView ? 'always' : 'never'}
-          // A single number, never a [min, max] range: a range is resolved
-          // against window.devicePixelRatio on every <Canvas> render, which
-          // silently reverted the governor. See the GOV_DPR block.
-          dpr={dprBase * GOV_DPR[quality]}
-          gl={{ antialias: false, alpha: false, powerPreference: 'high-performance' }}
-          onCreated={({ gl }) => gl.setClearColor('#050505', 1)}
-        >
-          <Scene
-            progressRef={progressRef}
-            drive={drive}
-            text={hero.title}
-            reserveRef={reserveRef}
-            onReady={handleReady}
-            onLayer={handleLayer}
-            onQuality={handleQuality}
-          />
-        </Canvas>
+        {canvas}
 
         {/* Vignette + edge fades in ONE element (stacked backgrounds): every div
             layered over the canvas is another full-screen blend the compositor
@@ -3859,23 +5170,137 @@ export default function ScrollScene({
                   </p>
                 </div>
               ))}
+
+              {/* The hold beat's prompt, and the way back out of an open part.
+                  Inside the measured box, so the model's left-edge reservation
+                  already covers it and no part can end up under this line. */}
+              <div
+                className="absolute inset-x-0 bottom-0 transition-opacity duration-500"
+                style={{ opacity: inspectable ? 1 : 0 }}
+                aria-hidden={!inspectable}
+              >
+                {opened >= 0 ? (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => handleSelect(-1)}
+                      tabIndex={inspectable ? 0 : -1}
+                      className="pointer-events-auto font-mono text-[10px] tracking-[0.3em] uppercase text-acid hover:text-smoke transition-colors"
+                    >
+                      ← {inspect.close}
+                    </button>
+                    {/* Named, not left to be discovered: with a part open the
+                        wheel no longer moves the page, and the way back out has
+                        to be on screen rather than guessed at. */}
+                    <p className="mt-3 font-mono text-[10px] tracking-[0.3em] uppercase text-mute">
+                      {inspect.cycle}
+                    </p>
+                  </>
+                ) : (
+                  <p className="font-mono text-[10px] tracking-[0.3em] uppercase text-mute">
+                    {inspect.hint}
+                  </p>
+                )}
+              </div>
             </div>
           </div>
         </div>
 
-        {/* Scroll progress rail */}
-        <div className="absolute right-6 lg:right-8 top-1/2 -translate-y-1/2 hidden md:flex flex-col items-center gap-3">
-          <span ref={readoutRef} className="font-mono text-[10px] text-mute tabular-nums">
-            000
-          </span>
-          <div className="relative h-44 w-px bg-white/10 overflow-hidden">
-            <div
-              ref={railFillRef}
-              className="absolute top-0 left-0 w-full bg-acid shadow-[0_0_12px_rgba(198,255,0,0.9)]"
-              style={{ height: '0%' }}
-            />
+        {/* Right rail, two states in one place: the scroll readout for the whole
+            page, and — once the diagram is assembled and taking a pointer — the
+            stack as a list, top to bottom in the order the parts appear on
+            screen. The list is not decoration: a canvas has nothing for a
+            keyboard to reach, so it is the only way into the diagram that does
+            not require a pointer, and it doubles as the signal that there is
+            something here to point AT. Both children share one grid cell so the
+            container is sized by the taller and neither moves as they cross-fade. */}
+        <div className="absolute right-6 lg:right-8 top-1/2 -translate-y-1/2 hidden md:grid">
+          <div
+            className="[grid-area:1/1] justify-self-end flex flex-col items-center gap-3 transition-opacity duration-500"
+            style={{ opacity: inspectable ? 0 : 1 }}
+            aria-hidden={inspectable}
+          >
+            <span ref={readoutRef} className="font-mono text-[10px] text-mute tabular-nums">
+              000
+            </span>
+            <div className="relative h-44 w-px bg-white/10 overflow-hidden">
+              <div
+                ref={railFillRef}
+                className="absolute top-0 left-0 w-full bg-acid shadow-[0_0_12px_rgba(198,255,0,0.9)]"
+                style={{ height: '0%' }}
+              />
+            </div>
+            <span className="font-mono text-[10px] text-mute tabular-nums">100</span>
           </div>
-          <span className="font-mono text-[10px] text-mute tabular-nums">100</span>
+
+          <nav
+            ref={railRef}
+            aria-label={inspect.rail}
+            className={`[grid-area:1/1] justify-self-end flex flex-col items-end gap-px transition-opacity duration-500 ${
+              inspectable ? 'pointer-events-auto' : 'pointer-events-none'
+            }`}
+            style={{ opacity: inspectable ? 1 : 0 }}
+            aria-hidden={!inspectable}
+          >
+            {parts.map((stage, i) => {
+              const on = active === i;
+              return (
+                <button
+                  key={i}
+                  type="button"
+                  tabIndex={inspectable ? 0 : -1}
+                  aria-pressed={opened === i}
+                  // Hover is written to a ref, not to state: the scene reads it in
+                  // its own frame loop and reports the result back through the same
+                  // channel the ray uses, so the rail and the geometry light each
+                  // other from ONE value instead of two that can disagree.
+                  onPointerEnter={() => {
+                    hoverRef.current = i;
+                  }}
+                  onPointerLeave={() => {
+                    hoverRef.current = -1;
+                  }}
+                  onFocus={() => {
+                    hoverRef.current = i;
+                  }}
+                  onBlur={() => {
+                    hoverRef.current = -1;
+                  }}
+                  onClick={() => handleSelect(opened === i ? -1 : i)}
+                  className="group flex items-center gap-2.5 py-1"
+                >
+                  {/* Titles first, ticks pinned to the right edge — so the index
+                      column stays put while the names fold away. They fold while
+                      a part is open because eight labels are 320px of a 1440px
+                      frame, and the model has to live in what the caption on the
+                      left has not already claimed. Seven of those labels are also
+                      redundant at that moment: the caption is naming the eighth.
+                      max-width rather than display, so it animates and so the
+                      button stops covering the geometry it uncovers. */}
+                  <span
+                    className={`font-mono text-[10px] uppercase tracking-[0.18em] text-right whitespace-nowrap overflow-hidden transition-all duration-500 ${
+                      opened >= 0 ? 'max-w-0 opacity-0' : 'max-w-[15rem] opacity-100'
+                    } ${on ? 'text-smoke' : 'text-mute/60 group-hover:text-mute'}`}
+                  >
+                    {stage.title}
+                  </span>
+                  <span
+                    data-rail-index
+                    className={`font-mono text-[9px] tabular-nums transition-colors ${
+                      on ? 'text-acid' : 'text-mute/60'
+                    }`}
+                  >
+                    {String(i + 1).padStart(2, '0')}
+                  </span>
+                  <span
+                    className={`h-px transition-all duration-300 ${
+                      on ? 'w-6 bg-acid shadow-[0_0_10px_rgba(198,255,0,0.9)]' : 'w-2.5 bg-white/20'
+                    }`}
+                  />
+                </button>
+              );
+            })}
+          </nav>
         </div>
       </div>
     </div>

@@ -335,6 +335,12 @@ export default function HomeClient() {
           loading: t('hero.loading'),
         }}
         stages={stages}
+        inspect={{
+          hint: t('scroll_scene.inspect_hint'),
+          close: t('scroll_scene.inspect_close'),
+          rail: t('scroll_scene.inspect_rail'),
+          cycle: t('scroll_scene.inspect_cycle'),
+        }}
       />
       <ProductsSection />
       <AboutSection />
