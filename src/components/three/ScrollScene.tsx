@@ -436,11 +436,11 @@ const WALK_BEAT = (WALK_S1 - WALK_S0) / WALK_CAPTURES;
 // Seconds the scene needs to cross each half of a beat at full tilt. Split,
 // because the two halves are not the same thing to look at: the handoff is
 // where the evaporation and the lift live and it gets the time, while the hold
-// is a static capture with only the camera dolly moving over it and may be
-// crossed faster — but not instantly, or the dolly snaps. Together this is
-// ~1.2s per capture, ~11s to walk the whole teardown if you never stop pushing.
-const PACE_HANDOFF_S = 0.85;
-const PACE_HOLD_S = 0.35;
+// is a static capture with the tail of the previous dolly still running over it
+// and may be crossed faster — but not instantly, or that dolly snaps. Together
+// this is ~1.65s per capture.
+const PACE_HANDOFF_S = 1.2;
+const PACE_HOLD_S = 0.45;
 const PACE_V_HANDOFF = (WALK_BEAT * SEQ_TRANSITION) / PACE_HANDOFF_S;
 const PACE_V_HOLD = (WALK_BEAT * (1 - SEQ_TRANSITION)) / PACE_HOLD_S;
 // Outside the walk: a sanity bound the spring never reaches (its own peak speed
@@ -454,6 +454,31 @@ const PACE_RAMP = 0.08;
 // How far scroll may lead (or trail) the scene inside the walk, in beats. One:
 // a fling commits to the capture in front of you and no further.
 const LEASH_BEATS = 1;
+// Fraction of a beat you have to move before releasing commits to the next
+// capture instead of returning to the one you were on. Small on purpose — one
+// wheel notch is about 0.2 of a beat, and "one scroll, one layer" is the whole
+// point. Below it the walk treats the move as a nudge and puts you back.
+const SNAP_TRIGGER = 0.15;
+// Quiet time after the last scroll event before the walk snaps. Longer than a
+// mouse wheel's notch-to-notch gap, so a slow wheel reads as one gesture.
+const SNAP_DELAY_MS = 220;
+// How close to a whole beat still counts as being ON that hold. Scroll
+// positions are whole pixels and a beat is a few hundred of them, so a snapped
+// rest lands a fraction of a beat off the exact boundary — and the leash asks
+// an integer question about it. Too tight a tolerance and the answer is "still
+// on the beat below", which pins the ceiling to the boundary the walk is
+// already sitting on and deadlocks every forward gesture. ~1vh: far larger than
+// any rounding, far smaller than SNAP_TRIGGER.
+const BEAT_EPS = 0.02;
+
+// The walk's position in beats, and back. Whole numbers are the capture holds:
+// the only places inside the walk where the scene is a readable still.
+function beatOf(s: number) {
+  return (s - WALK_S0) / WALK_BEAT;
+}
+function scrollOfBeat(b: number) {
+  return WALK_S0 + b * WALK_BEAT;
+}
 
 // Speed limit at a point on the scroll axis, in progress per second.
 function paceLimit(s: number) {
@@ -480,13 +505,39 @@ function paceLimit(s: number) {
 // walk yet is gated at the walk's own start, so a fling from the top of the
 // page stops at the first capture instead of landing in the middle of the
 // teardown with eight beats queued behind it.
+//
+// Both edges land on HOLDS, not on "one beat from wherever the scene happens to
+// be". An unquantised window preserved whatever phase you came to rest at: stop
+// once with the cabinet half evaporated and every flick after it left you half
+// evaporated again, one capture further along, because the window carried the
+// offset forward. Quantised, the window is the pair of readable stills either
+// side of the scene, and the walk cannot drift off them.
 function leashCeil(scene: number) {
   if (scene >= WALK_S1) return 1;
-  return Math.min(1, Math.max(scene, WALK_S0) + WALK_BEAT * LEASH_BEATS);
+  const b = beatOf(Math.max(scene, WALK_S0));
+  return Math.min(1, scrollOfBeat(Math.floor(b + BEAT_EPS) + LEASH_BEATS));
 }
 function leashFloor(scene: number) {
   if (scene <= WALK_S0) return 0;
-  return Math.max(0, Math.min(scene, WALK_S1) - WALK_BEAT * LEASH_BEATS);
+  const b = beatOf(Math.min(scene, WALK_S1));
+  return Math.max(0, scrollOfBeat(Math.ceil(b - BEAT_EPS) - LEASH_BEATS));
+}
+
+// Where a release should land, given where scroll got to and which hold it left.
+// `from` is the hold the gesture started on; a move of SNAP_TRIGGER in either
+// direction commits to the neighbouring one, anything less returns. One step per
+// release, so this can never skip a capture however far the gesture went — the
+// leash has already bounded that anyway.
+function snapBeat(s: number, from: number | null) {
+  const b = beatOf(s);
+  const hold = (n: number) => Math.min(WALK_CAPTURES, Math.max(0, n));
+  // No origin worth stepping from — the walk was entered from the table beat
+  // above it, or a jump the leash let through re-seated the scene. Land on the
+  // nearest hold instead, so arriving at capture 00 does not immediately step
+  // off it.
+  if (from === null || Math.abs(b - from) > 1 + SNAP_TRIGGER) return hold(Math.round(b));
+  const d = b - from;
+  return hold(from + (d > SNAP_TRIGGER ? 1 : d < -SNAP_TRIGGER ? -1 : 0));
 }
 
 type Drive = {
@@ -3324,19 +3375,76 @@ export default function ScrollScene({
       if (PAGING_KEYS.has(e.key)) mark();
     };
 
+    // Which capture hold the walk last came to rest on, or null if it does not
+    // know (before the walk, or after a jump the leash let through).
+    let rest: number | null = null;
+    let snapAt = 0;
+
+    // Inside the walk the readable states are the holds, and the walk is not
+    // allowed to rest anywhere else. The leash bounds how FAR a gesture goes;
+    // this decides where letting go LANDS — so a scroll that stalls half way
+    // through a removal finishes it rather than leaving the cabinet frozen at
+    // 40% evaporated, which is the state nothing in the scene is designed to be
+    // looked at in.
+    const applySnap = () => {
+      snapAt = 0;
+      const d = drive.current;
+      const live = inViewRef.current && performance.now() - d.wall < 1000 / PACE_MIN_FPS;
+      if (!d.paced || !d.primed || !live) return;
+      const cur = clamp01((window.scrollY - metrics.top) / metrics.span);
+      if (cur <= WALK_S0 || cur >= WALK_S1) {
+        rest = null;
+        return;
+      }
+      // Clamped by the leash as well: releasing must not put scroll somewhere a
+      // gesture could not have taken it, or a wheel turned faster than the
+      // scene can walk would snap its way past captures the leash just refused.
+      const want = Math.min(
+        Math.max(scrollOfBeat(snapBeat(cur, rest)), leashFloor(d.p)),
+        leashCeil(d.p)
+      );
+      // Recorded so a second snap inside the same gesture chain — the write
+      // below emits a scroll event, which can re-arm this within GESTURE_MS —
+      // sees the hold it just committed to and steps nowhere, instead of
+      // reading its own move as another gesture and walking off down the page.
+      rest = Math.round(beatOf(want));
+      const y = Math.round(metrics.top + want * metrics.span);
+      if (Math.abs(y - window.scrollY) < 1) return;
+      window.scrollTo({ top: y, behavior: 'instant' });
+      progressRef.current = want;
+      setProgress(want);
+    };
+    const scheduleSnap = () => {
+      if (snapAt) clearTimeout(snapAt);
+      snapAt = window.setTimeout(applySnap, SNAP_DELAY_MS);
+    };
+
     let raf = 0;
     const read = () => {
       raf = 0;
       const now = performance.now();
+      const d = drive.current;
       // A gap this long ends the chain; the next event starts a new one, which
       // is gesture-driven only if a gesture just marked it.
-      if (now - lastScrollAt > GESTURE_MS) chainLive = now - gestureAt < GESTURE_MS;
+      if (now - lastScrollAt > GESTURE_MS) {
+        chainLive = now - gestureAt < GESTURE_MS;
+        // Re-read the hold to step from at the top of every gesture, from where
+        // the scene actually is. Carrying it over from the last snap instead
+        // went stale the moment that snap declined to run — off view, under
+        // PACE_MIN_FPS, under reduced motion — and a stale origin makes the
+        // next release step the WRONG WAY: a nudge back off capture 4 that
+        // thought it started at 3 reads as +0.7 and commits forward.
+        const b = beatOf(d.p);
+        rest =
+          d.primed && b >= -BEAT_EPS && b <= WALK_CAPTURES + BEAT_EPS
+            ? Math.min(WALK_CAPTURES, Math.max(0, Math.round(b)))
+            : null;
+      }
       lastScrollAt = now;
 
       const y = window.scrollY;
       let p = clamp01((y - metrics.top) / metrics.span);
 
-      const d = drive.current;
       const held = Math.min(Math.max(p, leashFloor(d.p)), leashCeil(d.p));
       if (held !== p) {
         // Scroll is outside the window. Either hold it, or give up on holding
@@ -3362,10 +3470,13 @@ export default function ScrollScene({
         } else {
           // An anchor, the End key, the scrollbar thumb, a reload part-way down
           // — a deliberate "put me THERE". Honour it, rather than slow-walking
-          // the whole teardown to arrive.
+          // the whole teardown to arrive. The hold the walk thought it was on
+          // no longer means anything after a jump like that.
           d.primed = false;
+          rest = null;
         }
       }
+      scheduleSnap();
 
       progressRef.current = p;
       // The overlays are a percentage readout, a rail and a fading caption —
@@ -3397,6 +3508,7 @@ export default function ScrollScene({
     window.addEventListener('keydown', onKey);
     return () => {
       if (raf) cancelAnimationFrame(raf);
+      if (snapAt) clearTimeout(snapAt);
       window.removeEventListener('scroll', onScroll);
       window.removeEventListener('resize', onResize);
       window.removeEventListener('wheel', mark);
