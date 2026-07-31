@@ -70,14 +70,28 @@ body {
   transition: border-color 0.25s ease;
 }
 
-/* ---- Film grain (fixed overlay rendered by <Grain/>) ---- */
+/* ---- Film grain (fixed overlay rendered by <Grain/>) ----
+   Jitters on `transform`, not `background-position`. The two are visually
+   identical here — same tiled noise, same offsets, and `inset: -100px` gives
+   100px of bleed against a largest step of 100px — but only transform is a
+   compositor property, so the layer never re-rasterises after its first paint
+   instead of being invalidated five times a second.
+
+   Worth knowing what this did NOT fix, before anyone spends more time here: on
+   a 4K panel at 2.5x scale this overlay still costs ~8% of frames, and it costs
+   the same with the animation frozen. What it buys is not the jitter, it is
+   BEING THERE — a viewport-sized layer blended over the hero canvas is ~10 Mpx
+   of compositing on every frame the canvas draws. Freezing the animation
+   changed nothing measurable; hiding the element took dropped frames from ~22%
+   to ~12%. So the remaining lever is whether the hero wants a grain overlay at
+   all, which is an art-direction call and not a CSS one. */
 @keyframes grainShift {
-  0% { background-position: 0 0; }
-  20% { background-position: -60px 40px; }
-  40% { background-position: 40px -80px; }
-  60% { background-position: -100px -30px; }
-  80% { background-position: 70px 90px; }
-  100% { background-position: 0 0; }
+  0% { transform: translate3d(0, 0, 0); }
+  20% { transform: translate3d(-60px, 40px, 0); }
+  40% { transform: translate3d(40px, -80px, 0); }
+  60% { transform: translate3d(-100px, -30px, 0); }
+  80% { transform: translate3d(70px, 90px, 0); }
+  100% { transform: translate3d(0, 0, 0); }
 }
 .grain {
   position: fixed;

@@ -51,6 +51,48 @@ const MAX_SPLATS_MOBILE = 40000;
 // backs it would be ~42 MB at full quality.
 const PER_LAYER_MOBILE = 14000;
 
+// ------------------------------------------------------------- render scale
+// This pass is fill-rate bound and nothing else. Every gaussian is an
+// alpha-blended quad, the frame is many of them deep, and the cost tracks the
+// BACKING STORE — not the splat count, and not the CSS box.
+//
+// Which makes device pixel ratio the wrong thing to size the canvas by. A 4K
+// laptop panel reports dpr 2.5 against a ~1485x745 CSS viewport, so clamping
+// the ratio to 2 asks for 4.4 Mpx of gaussians — for a hero that occupies the
+// same number of CSS pixels as it does on any other machine.
+//
+// Measured on one (4K at 2.5x, Chrome on an AMD Renoir iGPU), wheel-scrolling
+// the hero end to end. It is a TAIL story, not a mean one: the median frame was
+// 16.7 ms before and after, but at 4.4 Mpx the 90th percentile was 50 ms and the
+// 99th was 167 ms, and 16.9% of frames missed vsync. At 1.9 Mpx: p90 33 ms,
+// p99 100 ms, 13.0% missed. Same splats, same beats — the difference is the
+// frames that arrive late enough to see.
+//
+// So size by a PIXEL BUDGET instead. Soft gaussians have no edges to alias,
+// which is already why `antialias` is off on the context; that same fact is why
+// letting the browser upscale a slightly smaller buffer costs nothing you can
+// see while buying the frame back very nearly linearly.
+//
+// Never below 1, though. The budget is a CEILING for hidpi panels, not a
+// downgrade for the ordinary dpr-1 desktop that was rendering 1920x1080 and
+// coping fine. Going under 1 is the governor's call, and only once a device has
+// produced evidence it needs it.
+const PIXEL_BUDGET_DESKTOP = 1_900_000;
+const PIXEL_BUDGET_MOBILE = 1_100_000;
+const DPR_CAP_DESKTOP = 2;
+const DPR_CAP_MOBILE = 1.75;
+
+function baseDpr() {
+  if (typeof window === 'undefined') return 1;
+  const w = window.innerWidth;
+  const h = window.innerHeight;
+  const small = w < 820;
+  const cap = Math.min(window.devicePixelRatio || 1, small ? DPR_CAP_MOBILE : DPR_CAP_DESKTOP);
+  const budget = small ? PIXEL_BUDGET_MOBILE : PIXEL_BUDGET_DESKTOP;
+  const fit = Math.sqrt(budget / Math.max(1, w * h));
+  return Math.min(cap, Math.max(1, fit));
+}
+
 // How tall the hero scrolls. Everything below is a SHARE of this, so the only
 // way to give a beat more room in absolute terms is here.
 const HERO_VH = 820;
@@ -2369,6 +2411,7 @@ function SplatCloud({
   drive,
   onReady,
   onLayer,
+  onQuality,
 }: {
   text: string;
   progressRef: React.RefObject<number>;
@@ -2382,6 +2425,10 @@ function SplatCloud({
   // spring-smoothed progress, so deriving the index a second time from raw
   // scroll would drift the text off the model it is labelling.
   onLayer?: (i: number) => void;
+  // The governor's chosen rung, reported out so ScrollScene can put it on the
+  // <Canvas dpr> prop. See the GOV_DPR block for why the render scale cannot be
+  // set from inside the frame loop.
+  onQuality?: (level: number) => void;
 }) {
   const layerSeen = useRef(-1);
   const axisRef = useRef(new THREE.Vector3(0, 1, 0));
@@ -2395,17 +2442,22 @@ function SplatCloud({
   // if it does not load the hero simply ends on the walk.
   const [cad, setCad] = useState<CadLayer[] | null>(null);
   const { size, camera } = useThree();
-  const setDpr = useThree((s) => s.setDpr);
   const gov = useRef<Governor>({
     ema: 16.7,
+    seeded: false,
     bad: 0,
     good: 0,
     cooldown: 0,
     level: 0,
-    dpr0: 0,
+    floor: GOV_MAX_LEVEL,
+    probe: 0,
+    probeFrom: 0,
     sortEvery: 1,
     frame: 0,
   });
+  // The level-0 ellipse cap, kept so the governor's rungs can scale it with the
+  // render scale they set. Filled in when the material is built.
+  const maxAxis0 = useRef(0);
 
   useEffect(() => {
     reducedMotion.current =
@@ -2619,6 +2671,8 @@ function SplatCloud({
 
   const material = useMemo(() => {
     if (!data || !src) return null;
+    maxAxis0.current =
+      typeof window !== 'undefined' && window.innerWidth < 820 ? 120 : 220;
     return new THREE.RawShaderMaterial({
       glslVersion: THREE.GLSL3,
       uniforms: {
@@ -2629,10 +2683,7 @@ function SplatCloud({
         uViewport: { value: new THREE.Vector2(1, 1) },
         uTextDot: { value: 0.005 },
         uTextAlpha: { value: 0.82 },
-        uMaxAxis: {
-          value:
-            typeof window !== 'undefined' && window.innerWidth < 820 ? 120 : 220,
-        },
+        uMaxAxis: { value: maxAxis0.current },
         // 0 => the capture renders in its true 3DGS colours; flip to
         // src.photoreal ? 1 : 0 to re-engage the silver-gelatin mono grade
         uGrade: { value: 0 },
@@ -3080,28 +3131,70 @@ function SplatCloud({
     // Quality governor: EMA over the real frame cadence, act with hysteresis.
     // Skipped until the intro has played so load spikes don't trigger it.
     if (intro.current >= 1) {
-      if (g.dpr0 === 0) g.dpr0 = state.viewport.dpr;
-      g.ema += (Math.min(delta * 1000, 100) - g.ema) * 0.08;
-      if (g.cooldown > 0) g.cooldown--;
+      const ms = Math.min(delta * 1000, 100);
+      // Seeded from the first governed frame rather than eased up from a 16.7 ms
+      // guess. At 30 fps that warm-up was ~25 frames of the EMA climbing toward
+      // evidence the very first sample already carried.
+      if (g.seeded) g.ema += (ms - g.ema) * 0.08;
+      else {
+        g.ema = ms;
+        g.seeded = true;
+      }
+      const dt = Math.min(delta, 0.1);
+      if (g.cooldown > 0) g.cooldown -= dt;
+
+      // Settle a demotion at a level, whether it is a new one or a rejected one
+      // being handed back. Everything a rung owns is set here and nowhere else.
+      const apply = () => {
+        g.sortEvery = g.level >= 2 ? 2 : 1;
+        // The ellipse cap is in BACKING-STORE pixels, so it has to ride the
+        // render scale or the rungs change the picture as well as the cost: at
+        // 0.6x scale a gaussian projects to 0.6x the pixels, and a fixed cap
+        // would clip 0.6x as much of it. Scaled, every rung draws the same
+        // image at a different resolution — which is the whole contract here.
+        material.uniforms.uMaxAxis.value = maxAxis0.current * GOV_DPR[g.level];
+        onQuality?.(g.level);
+        st.lastP = -1; // force a fresh sort at the new count
+      };
+
+      // Read the probe exactly once, as its cooldown runs out.
+      if (g.probe > 0 && g.cooldown <= 0) {
+        if ((g.probe - g.ema) / g.probe < GOV_MIN_GAIN) {
+          g.floor = g.probeFrom; // this rung, and everything under it, is not the problem
+          g.level = g.probeFrom;
+          apply();
+        }
+        g.probe = 0;
+        g.bad = 0;
+        g.good = 0;
+      }
+
       let move = 0;
       if (g.ema > GOV_SLOW_MS) {
         g.good = 0;
-        if (++g.bad > 45 && g.cooldown === 0 && g.level < GOV_MAX_LEVEL) move = 1;
+        g.bad += dt;
+        if (g.bad > GOV_DEGRADE_S && g.cooldown <= 0 && g.level < g.floor) {
+          move = g.ema > GOV_LEAP_MS ? 2 : 1;
+        }
       } else if (g.ema < GOV_FAST_MS) {
         g.bad = 0;
-        if (++g.good > 240 && g.cooldown === 0 && g.level > 0) move = -1;
+        g.good += dt;
+        if (g.good > GOV_RECOVER_S && g.cooldown <= 0 && g.level > 0) move = -1;
       } else {
         g.bad = 0;
         g.good = 0;
       }
       if (move !== 0) {
-        g.level += move;
+        const from = g.level;
+        g.level = Math.max(0, Math.min(g.floor, g.level + move));
         g.bad = 0;
         g.good = 0;
-        g.cooldown = move > 0 ? 120 : 420;
-        g.sortEvery = g.level >= 2 ? 2 : 1;
-        setDpr(Math.max(1, g.dpr0 * GOV_DPR[g.level]));
-        st.lastP = -1; // force a fresh sort at the new count
+        g.cooldown = move > 0 ? GOV_COOL_DOWN_S : GOV_COOL_UP_S;
+        if (move > 0) {
+          g.probe = g.ema;
+          g.probeFrom = from;
+        }
+        apply();
       }
     }
   });
@@ -3125,6 +3218,21 @@ function SplatCloud({
 // splat density. Every animation beat stays identical — degradation is only
 // resolution and grain density. Recovers (with hysteresis) up to the initial
 // tier when the device turns out to have headroom.
+//
+// The RUNGS are multipliers on the base render scale, and they are applied by
+// ScrollScene owning the <Canvas dpr> prop rather than by calling r3f's
+// setDpr() from in here. That is not a style preference. <Canvas> re-runs
+// `configure({ dpr, ... })` on EVERY render of its own element, and configure
+// does `if (state.viewport.dpr !== calculateDpr(dpr)) setDpr(dpr)` — so with a
+// `[min, max]` range prop, any re-render of the host component snaps the render
+// scale back to the top of the range. This component's host re-rendered on
+// every scroll tick, so the governor's decisions were reverted within a frame or
+// two of being made — while the governor, which tracks its own rung, went on
+// believing it had made them. Observed on a 4K panel: parked at one scroll
+// position for 24 s at a steady 30 fps, the backing store never changed once,
+// and under scroll it flickered between two rungs and settled back at the top.
+// Either way the ladder was decorative. A plain number prop, owned in React
+// state, agrees with configure's check and therefore sticks.
 const GOV_DPR = [1, 0.85, 0.72, 0.72, 0.6];
 // Density is applied as a stride (draw every Nth splat of the live span), so
 // these quantise to 1/round(1/x) — keep them at reciprocals of whole numbers or
@@ -3134,14 +3242,48 @@ const GOV_COUNT = [1, 1, 1, 0.5, 1 / 3];
 const GOV_MAX_LEVEL = GOV_DPR.length - 1;
 const GOV_SLOW_MS = 26; // sustained above this (≈ <40fps) => degrade
 const GOV_FAST_MS = 12.5; // sustained below this => try recovering
+// Hysteresis in SECONDS, not in frames. Frame counts are the wrong unit for a
+// governor that only ever engages on slow devices: 45 bad frames plus a
+// 120-frame cooldown is 2.7 s at 60 fps and 8.2 s at 20 fps, so the worse the
+// device, the slower the fix arrived. Held in seconds, a struggling device
+// reaches a rung it can actually draw in about a second per step.
+const GOV_DEGRADE_S = 0.7;
+const GOV_RECOVER_S = 6;
+const GOV_COOL_DOWN_S = 1.2;
+const GOV_COOL_UP_S = 5;
+// How far over budget counts as "not one rung short". A device at twice the
+// frame budget will not be rescued by an 0.85x render scale, and stepping one
+// rung at a time with a cooldown between each just spends the cooldowns.
+const GOV_LEAP_MS = GOV_SLOW_MS * 2;
+// Every demotion is also a PROBE: the cooldown that follows it is spent
+// measuring whether the rung actually bought a shorter frame, and if it did not,
+// the rung is handed back and the ladder stops there.
+//
+// Because a render-scale ladder can only fix a frame that is limited by the
+// render scale, and sometimes nothing is. Reproduced on a 4K surface where the
+// limit was the browser compositing a viewport-sized canvas across 7.5 Mpx of
+// device pixels — a cost paid per frame whatever is inside the canvas: dropping
+// the backing store from 4.74 Mpx to 0.68 Mpx, seven times less to draw, left
+// the frame at exactly 33.3 ms. Without this check the governor reads "still
+// slow" as "not far enough down", walks to the bottom rung and parks there: the
+// hero ends up soft AND still at 30 fps, which is strictly worse than where it
+// started. 12% is comfortably inside a real rung's win
+// (0.85x scale ≈ 28% fewer pixels) and comfortably outside vsync quantisation
+// noise, which lands on 16.7 / 33.3 / 50 and moves in halves, not tenths.
+const GOV_MIN_GAIN = 0.12;
 
 type Governor = {
   ema: number;
-  bad: number;
-  good: number;
-  cooldown: number;
+  seeded: boolean;
+  bad: number; // seconds of sustained slow
+  good: number; // seconds of sustained fast
+  cooldown: number; // seconds
   level: number;
-  dpr0: number;
+  // Lowest rung worth taking, learned. Starts permissive; a demotion that fails
+  // its probe pulls it up to the last level that was actually paying for itself.
+  floor: number;
+  probe: number; // ema when the demotion under test was made; 0 = not probing
+  probeFrom: number; // level to fall back to if it fails
   sortEvery: number;
   frame: number;
 };
@@ -3217,6 +3359,7 @@ function Scene({
   text,
   onReady,
   onLayer,
+  onQuality,
 }: {
   progressRef: React.RefObject<number>;
   reserveRef: React.RefObject<number>;
@@ -3227,6 +3370,7 @@ function Scene({
   text: string;
   onReady?: () => void;
   onLayer?: (i: number) => void;
+  onQuality?: (level: number) => void;
 }) {
   return (
     <>
@@ -3237,6 +3381,7 @@ function Scene({
         drive={drive}
         onReady={onReady}
         onLayer={onLayer}
+        onQuality={onQuality}
       />
       <BackgroundParticles progressRef={progressRef} />
       <CameraRig progressRef={progressRef} drive={drive} />
@@ -3272,10 +3417,22 @@ export default function ScrollScene({
     paced: true,
     wall: 0,
   });
-  const [progress, setProgress] = useState(0);
   const [mounted, setMounted] = useState(false);
   const [ready, setReady] = useState(false);
   const [inView, setInView] = useState(true);
+  // Render scale, owned here because <Canvas> reasserts its `dpr` prop on every
+  // render — see the GOV_DPR block. `quality` is the governor's rung; the base
+  // is the pixel budget, re-measured on resize so dragging the window to another
+  // monitor re-fits it.
+  const [quality, setQuality] = useState(0);
+  const [dprBase, setDprBase] = useState(() => baseDpr());
+  const handleQuality = useCallback((level: number) => setQuality(level), []);
+  useEffect(() => {
+    const fit = () => setDprBase(baseDpr());
+    fit();
+    window.addEventListener('resize', fit, { passive: true });
+    return () => window.removeEventListener('resize', fit);
+  }, []);
   // Same fact the frameloop is gated on, readable from the scroll handler. It
   // matters there: out of view the canvas stops and the spring FREEZES, so a
   // leash that trusted a stale `drive.p` would pin the visitor inside a hero
@@ -3286,6 +3443,32 @@ export default function ScrollScene({
   const [layer, setLayer] = useState(-1);
   const handleReady = useCallback(() => setReady(true), []);
   const handleLayer = useCallback((i: number) => setLayer(i), []);
+
+  // The three overlays that track scroll continuously — the hero copy's fade,
+  // the rail fill, the percentage readout — written straight to the DOM instead
+  // of through state.
+  //
+  // They used to be a quantised `progress` state, which is a re-render of this
+  // component every 0.4% of the page: ~250 of them across the hero, each one
+  // re-rendering <Canvas>, and <Canvas> re-runs r3f's async configure() and
+  // re-reconciles the whole scene tree every time it renders. All of that landed
+  // in the frames the canvas was trying to draw, during scroll, which is exactly
+  // when there is nothing to spare. None of these three needs React: between
+  // them they are one opacity, one height and three digits.
+  const heroFadeRef = useRef<HTMLDivElement>(null);
+  const railFillRef = useRef<HTMLDivElement>(null);
+  const readoutRef = useRef<HTMLSpanElement>(null);
+  const paintProgress = useCallback((p: number) => {
+    if (heroFadeRef.current) {
+      heroFadeRef.current.style.opacity = String(clamp01(1 - p * 4.5));
+    }
+    if (railFillRef.current) railFillRef.current.style.height = `${p * 100}%`;
+    const out = readoutRef.current;
+    if (out) {
+      const digits = String(Math.round(p * 100)).padStart(3, '0');
+      if (out.textContent !== digits) out.textContent = digits;
+    }
+  }, []);
 
   // How many pixels off the left edge the caption claims, handed to the scene so
   // it can keep the model out of them. 0 means "no reservation": below the md
@@ -3412,7 +3595,7 @@ export default function ScrollScene({
       if (Math.abs(y - window.scrollY) < 1) return;
       window.scrollTo({ top: y, behavior: 'instant' });
       progressRef.current = want;
-      setProgress(want);
+      paintProgress(want);
     };
     const scheduleSnap = () => {
       if (snapAt) clearTimeout(snapAt);
@@ -3479,14 +3662,10 @@ export default function ScrollScene({
       scheduleSnap();
 
       progressRef.current = p;
-      // The overlays are a percentage readout, a rail and a fading caption —
-      // none of them can show more than a couple of hundred steps, so React
-      // reconciles a fraction as often as the scroll fires while the canvas
-      // still sees every pixel of it. The ends are exact so the rail lands
-      // cleanly on 000 and 100.
-      setProgress((prev) =>
-        Math.abs(prev - p) > 0.004 || p === 0 || p === 1 ? p : prev
-      );
+      // Straight to the DOM — no state, no reconcile, no <Canvas> reconfigure.
+      // This already runs at most once per painted frame (see onScroll), so it
+      // needs no quantising of its own either.
+      paintProgress(p);
     };
     // Scroll events can outpace the display; coalescing to one read per frame
     // means the work happens once per painted frame at most.
@@ -3516,7 +3695,7 @@ export default function ScrollScene({
       window.removeEventListener('touchmove', mark);
       window.removeEventListener('keydown', onKey);
     };
-  }, [mounted]);
+  }, [mounted, paintProgress]);
 
   // Reduced motion turns the pacing off wholesale. A leash and a speed limit
   // are both MORE motion from the visitor's point of view — the page moving
@@ -3532,7 +3711,6 @@ export default function ScrollScene({
     return () => mq.removeEventListener('change', apply);
   }, []);
 
-  const heroOpacity = clamp01(1 - progress * 4.5); // subtitle/hint fade early
   // One caption per capture, indexed by what the scene says is on screen. The
   // old version split three captions evenly across the tail of the page from an
   // arbitrary 0.72, which had nothing to do with what the model was showing.
@@ -3565,11 +3743,10 @@ export default function ScrollScene({
           // spare.
           camera={{ position: [0, 0, 10], fov: 50, near: 0.5, far: 50 }}
           frameloop={inView ? 'always' : 'never'}
-          dpr={
-            typeof window !== 'undefined' && window.innerWidth < 820
-              ? [1, 1.75]
-              : [1, 2]
-          }
+          // A single number, never a [min, max] range: a range is resolved
+          // against window.devicePixelRatio on every <Canvas> render, which
+          // silently reverted the governor. See the GOV_DPR block.
+          dpr={dprBase * GOV_DPR[quality]}
           gl={{ antialias: false, alpha: false, powerPreference: 'high-performance' }}
           onCreated={({ gl }) => gl.setClearColor('#050505', 1)}
         >
@@ -3580,6 +3757,7 @@ export default function ScrollScene({
             reserveRef={reserveRef}
             onReady={handleReady}
             onLayer={handleLayer}
+            onQuality={handleQuality}
           />
         </Canvas>
 
@@ -3616,8 +3794,8 @@ export default function ScrollScene({
 
         {/* Hero overlay — eyebrow + subtitle + scroll cue, fade as you scroll */}
         <div
+          ref={heroFadeRef}
           className="absolute inset-0 flex flex-col items-center justify-end pb-16 md:pb-20 pointer-events-none"
-          style={{ opacity: heroOpacity }}
         >
           <div className={ready ? 'animate-fade-up [animation-delay:600ms]' : 'opacity-0'}>
             <p className="font-mono text-[11px] md:text-xs tracking-[0.4em] uppercase text-acid text-center mb-4">
@@ -3687,13 +3865,14 @@ export default function ScrollScene({
 
         {/* Scroll progress rail */}
         <div className="absolute right-6 lg:right-8 top-1/2 -translate-y-1/2 hidden md:flex flex-col items-center gap-3">
-          <span className="font-mono text-[10px] text-mute tabular-nums">
-            {String(Math.round(progress * 100)).padStart(3, '0')}
+          <span ref={readoutRef} className="font-mono text-[10px] text-mute tabular-nums">
+            000
           </span>
           <div className="relative h-44 w-px bg-white/10 overflow-hidden">
             <div
+              ref={railFillRef}
               className="absolute top-0 left-0 w-full bg-acid shadow-[0_0_12px_rgba(198,255,0,0.9)]"
-              style={{ height: `${progress * 100}%` }}
+              style={{ height: '0%' }}
             />
           </div>
           <span className="font-mono text-[10px] text-mute tabular-nums">100</span>
