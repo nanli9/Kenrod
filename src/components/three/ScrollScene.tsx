@@ -1821,10 +1821,39 @@ function parseCadLayers(ab: ArrayBuffer, indexAb: ArrayBuffer): CadLayer[] | nul
   // World surface area per palette entry, instance-weighted, accumulated as the
   // shapes are unpacked below. It costs nothing to collect — the detail channel's
 
-  // One shape: dequantise and de-interleave once, on load. The file's layout is the
-  // compact one; the GPU gets float positions and normals, because unpacking
-  // octahedral normals per vertex in the shader would cost more than the bytes it
-  // saves in VRAM.
+  // One shape: dequantise and de-interleave once, on load.
+  //
+  // Normals and colours stay QUANTISED all the way to the GPU, and the note that
+  // used to be here — that unpacking octahedral normals per vertex in the shader
+  // would cost more than the bytes it saves — was answering a question nobody has
+  // to ask. A normalised integer attribute is widened to float by the fixed
+  // function vertex fetch, at no ALU cost and with no shader change: `in vec3
+  // normal` reads exactly the same values whether it is fed 12 bytes of float or 6
+  // bytes of SHORT. Only the 2-component octahedral form needs real instructions,
+  // and this does not use it.
+  //
+  // The expansion it was defending was 3.3x: a 12-byte-per-vertex file became 40
+  // bytes on the GPU (pos 12 + nrm 12 + col 12 + mra 4) across ~432k vertices. That
+  // is the wrong trade twice over, because this pass is VERTEX bound — 1.1M
+  // triangles over 5.2 Mpx is 4.7 pixels a triangle — so those bytes are re-fetched
+  // for every one of ~1.5M vertex invocations on every drawn frame, not merely
+  // parked in VRAM. 40 -> 28 bytes.
+  //
+  // The widths are not arbitrary. Colour is 16-bit because the palette's darkest
+  // channel is 0.0020 in LINEAR light: 8-bit would quantise that to one step of
+  // 1/255 and put a 98% error on it, which is the black gear centre turning grey.
+  // 16-bit puts it at 0.38%. Normals are 16-bit because the specular
+  // antialiasing keys off the screen-space variance of the normal and a chrome
+  // bearing sits at roughness 0.06, where 8-bit's 0.45 degrees of angular error is
+  // a visible wobble in the highlight. Neither is a guess; see the palette read.
+  //
+  // Positions are deliberately left as float. They are the remaining 12 bytes and
+  // the file has them as uint16 with a per-shape offset and scale, but taking them
+  // needs that offset and scale as PER-SHAPE uniforms — the materials are per
+  // LAYER, shared by every shape in it — which means an onBeforeRender on all 120
+  // meshes plus dequantisation in the surface sampler and in the detail channel's
+  // area sums. Six bytes for four more places to be wrong, on the one attribute
+  // where a mistake is a cracked model rather than a slightly wrong colour.
   function buildGroup(gi: number): {
     geo: THREE.BufferGeometry;
     mats: Float32Array;
@@ -1858,8 +1887,8 @@ function parseCadLayers(ab: ArrayBuffer, indexAb: ArrayBuffer): CadLayer[] | nul
     const i16 = new Int16Array(ab, vbase * stride, nverts * 6);
     const u8 = new Uint8Array(ab, vbase * stride, nverts * stride);
     const pos = new Float32Array(nverts * 3);
-    const nrm = new Float32Array(nverts * 3);
-    const col = new Float32Array(nverts * 3);
+    const nrm = new Int16Array(nverts * 3);
+    const col = new Uint16Array(nverts * 3);
     // metallic, roughness, occlusion, DETAIL. The fourth channel is not in the
     // file — it is measured below from the decimated triangles themselves.
     const mra = new Uint8Array(nverts * 4);
@@ -1884,15 +1913,26 @@ function parseCadLayers(ab: ArrayBuffer, indexAb: ArrayBuffer): CadLayer[] | nul
         nx = (1 - Math.abs(ny)) * (ax >= 0 ? 1 : -1);
         ny = (1 - Math.abs(ax)) * (ny >= 0 ? 1 : -1);
       }
-      const inv = 1 / Math.sqrt(nx * nx + ny * ny + nz * nz);
-      nrm[d] = nx * inv;
-      nrm[d + 1] = ny * inv;
-      nrm[d + 2] = nz * inv;
+      // Straight back out to 16-bit. -32768 is deliberately never produced: GL
+      // reads a signed normalised attribute as max(v / 32767, -1), so 32767 is
+      // the whole magnitude. Round, do NOT let the store do the conversion — a
+      // typed array WRAPS on overflow rather than clamping, so a value a hair
+      // over 32767 would land on -32768 and turn one vertex's normal inside out.
+      // It cannot get there from here (|nx| <= len by construction, and two
+      // roundings cannot add half a unit), but the margin is worth naming.
+      const inv = 32767 / Math.sqrt(nx * nx + ny * ny + nz * nz);
+      nrm[d] = Math.round(nx * inv);
+      nrm[d + 1] = Math.round(ny * inv);
+      nrm[d + 2] = Math.round(nz * inv);
 
+      // Rounded for the same reason and one of its own: the implicit conversion
+      // truncates toward zero, which would double the quantisation error for
+      // nothing. Rounded, the worst palette entry moves by 0.0101 of one 8-bit
+      // sRGB output code.
       const pi = u8[v * stride + 10];
-      col[d] = palCol[pi * 3];
-      col[d + 1] = palCol[pi * 3 + 1];
-      col[d + 2] = palCol[pi * 3 + 2];
+      col[d] = Math.round(palCol[pi * 3] * 65535);
+      col[d + 1] = Math.round(palCol[pi * 3 + 1] * 65535);
+      col[d + 2] = Math.round(palCol[pi * 3 + 2] * 65535);
       mra[m] = Math.round(palMr[pi * 2] * 255);
       mra[m + 1] = Math.round(palMr[pi * 2 + 1] * 255);
       mra[m + 2] = u8[v * stride + 11];
@@ -1900,8 +1940,10 @@ function parseCadLayers(ab: ArrayBuffer, indexAb: ArrayBuffer): CadLayer[] | nul
 
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-    geo.setAttribute('normal', new THREE.BufferAttribute(nrm, 3));
-    geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    // normalized: the fetch widens SHORT to [-1,1] and USHORT to [0,1] for free,
+    // so CAD_VERT reads the same vec3 it always did.
+    geo.setAttribute('normal', new THREE.BufferAttribute(nrm, 3, true));
+    geo.setAttribute('color', new THREE.BufferAttribute(col, 3, true));
     geo.setAttribute('mra', new THREE.BufferAttribute(mra, 4, true));
     const idx =
       iw === 2
@@ -2128,9 +2170,34 @@ function parseCadLayers(ab: ArrayBuffer, indexAb: ArrayBuffer): CadLayer[] | nul
       const im = new THREE.InstancedMesh(built.geo, material, ninst);
       im.instanceMatrix = new THREE.InstancedBufferAttribute(built.mats, 16);
       im.instanceMatrix.needsUpdate = true;
-      // The vertex shader applies instanceMatrix itself, so three's own bounding
-      // volumes would be computed from the untransformed shape. Nothing here is ever
-      // off screen during the one beat that draws it.
+      // Not culled — but not for the reason this used to give, and it is worth
+      // recording why, because "just turn culling on" is the obvious first idea
+      // anyone has when they see 122 draw calls with one part filling the screen.
+      //
+      // The old reason was that the vertex shader applies instanceMatrix itself,
+      // so three's bounding volumes would describe the untransformed shape. That
+      // is simply wrong about three: InstancedMesh.computeBoundingSphere() unions
+      // the geometry's sphere under EVERY instance matrix, and the frustum test
+      // puts that through matrixWorld, which carries the group's fit, yaw and the
+      // layer's lift. Culling would agree with gl_Position exactly — that is
+      // uViewProj * modelMatrix * instanceMatrix * position with no vertex
+      // displacement anywhere, and uViewProj is copied from
+      // projectionMatrix * matrixWorldInverse, the same product three builds its
+      // own frustum from.
+      //
+      // The real reason is the machine's four-fold symmetry, and it is a fact
+      // about the ASSET, not about three. Measured over the 120 shapes: 72 of them
+      // carry exactly 4 instances, one per corner, and their union sphere has a
+      // median radius of 1.98 against an assembly radius of 5.39 — parts whose own
+      // geometry is 0.04 across become a third of the machine wide the moment the
+      // four copies are unioned. Only the 36 single-instance shapes have a sphere
+      // (0.31) tight enough to ever fall outside the frustum. Turning culling on
+      // and measuring changed nothing at all: 122 calls and 1,097k triangles per
+      // frame with a part focused, identical to the number without it.
+      //
+      // Culling that could pay would have to be per INSTANCE, which means
+      // rebuilding instance buffers every frame — against a beat that the idle
+      // skip already declines to draw at all most of the time.
       im.frustumCulled = false;
       im.renderOrder = 1;
       root.add(im);
@@ -2313,8 +2380,8 @@ function parseCadLayers(ab: ArrayBuffer, indexAb: ArrayBuffer): CadLayer[] | nul
 function sampleCadSurface(cad: CadLayer[], limit: number): ModelSource | null {
   type Piece = {
     pos: Float32Array;
-    col: Float32Array;
-    nrm: Float32Array;
+    col: Uint16Array;
+    nrm: Int16Array;
     mra: Uint8Array;
     idx: ArrayLike<number>;
     cdf: Float32Array; // cumulative LOCAL triangle area, one entry per triangle
@@ -2354,8 +2421,12 @@ function sampleCadSurface(cad: CadLayer[], limit: number): ModelSource | null {
       const index = geo.getIndex();
       if (!posAttr || !colAttr || !nrmAttr || !mraAttr || !index) continue;
       const pos = posAttr.array as Float32Array;
-      const col = colAttr.array as Float32Array;
-      const nrm = nrmAttr.array as Float32Array;
+      // Quantised on the way to the GPU, so this pass has to undo the same two
+      // scalings the vertex fetch would have done for it. The normal's cancels —
+      // it is normalised three lines after it is read — so only the colour needs
+      // a divide. See the widths note in buildGroup.
+      const col = colAttr.array as Uint16Array;
+      const nrm = nrmAttr.array as Int16Array;
       const mra = mraAttr.array as Uint8Array;
       const idx = index.array as ArrayLike<number>;
 
@@ -2496,7 +2567,10 @@ function sampleCadSurface(cad: CadLayer[], limit: number): ModelSource | null {
       d *= direct;
       for (let ch = 0; ch < 3; ch++) {
         const alb =
-          pos3(piece.col, a, ch) * wgt + pos3(piece.col, b, ch) * u + pos3(piece.col, c, ch) * vv;
+          (pos3(piece.col, a, ch) * wgt +
+            pos3(piece.col, b, ch) * u +
+            pos3(piece.col, c, ch) * vv) /
+          65535;
         lin[ch] = alb * (d + irrOf(nv.y, ch) * ambK) * WALK_EXPOSURE;
       }
       agxJs(lin[0], lin[1], lin[2], lin);
@@ -2519,7 +2593,7 @@ function sampleCadSurface(cad: CadLayer[], limit: number): ModelSource | null {
   return { count: w, pos: outPos, radius: outRadius, color: outCol, opacity: outOpacity };
 }
 
-function pos3(a: Float32Array, i: number, ch: number) {
+function pos3(a: Float32Array | Int16Array | Uint16Array, i: number, ch: number) {
   return a[i * 3 + ch];
 }
 
