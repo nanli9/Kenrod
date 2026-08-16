@@ -2281,13 +2281,17 @@ function parseCadLayers(ab: ArrayBuffer, indexAb: ArrayBuffer): CadLayer[] | nul
       // median radius of 1.98 against an assembly radius of 5.39 — parts whose own
       // geometry is 0.04 across become a third of the machine wide the moment the
       // four copies are unioned. Only the 36 single-instance shapes have a sphere
-      // (0.31) tight enough to ever fall outside the frustum. Turning culling on
-      // and measuring changed nothing at all: 122 calls and 1,097k triangles per
-      // frame with a part focused, identical to the number without it.
+      // (0.31) tight enough to ever fall outside the frustum, so culling was turned
+      // on, measured, and turned off again having changed nothing.
       //
-      // Culling that could pay would have to be per INSTANCE, which means
-      // rebuilding instance buffers every frame — against a beat that the idle
-      // skip already declines to draw at all most of the time.
+      // And the case it was supposed to rescue does not need rescuing. Isolating a
+      // part already culls at the LAYER, which is a coarser test than the frustum
+      // and a far more effective one: c.alpha damps to zero on every layer but the
+      // chosen one, root.visible follows it, and the whole subtree stops being
+      // walked. Measured on the focused belt view: 35 draw calls and 247k triangles
+      // a frame against 122 and 1,097k unfocused. Frustum culling has nothing left
+      // to find there, and what it could find elsewhere it cannot see, because the
+      // volumes are a third of the machine wide.
       im.frustumCulled = false;
       im.renderOrder = 1;
       root.add(im);
@@ -4799,8 +4803,26 @@ const GOV_DPR = [1, 0.85, 0.72, 0.62, 0.52];
 // is the only stretch of the page where the cloud is drawn at all.
 const GOV_COUNT = [1, 1, 1, 0.5, 1 / 3];
 const GOV_MAX_LEVEL = GOV_DPR.length - 1;
-const GOV_SLOW_MS = 26; // sustained above this (≈ <40fps) => degrade
-const GOV_FAST_MS = 12.5; // sustained below this => try recovering
+// Sustained above this => degrade. It was 26 ms, which is 38 fps, and that left a
+// band where the governor watched a device judder and did nothing: anything
+// between 38 and 80 fps sat at full quality for ever, because the recovery
+// threshold below is the other edge. A machine holding a steady 45 fps is the
+// exact case this ladder exists for — it is fast enough never to trip a 38 fps
+// floor and slow enough that every third vsync is missed on a 60 Hz panel and two
+// in three on a 120 Hz one, which reads as judder rather than as slowness.
+//
+// 20 ms is ~50 fps, and the margin above the 16.7 ms vsync floor is deliberate:
+// a device that is comfortably holding 60 fps measures 16.7 ms because that is
+// what vsync hands it, not because it is struggling, and it must not be demoted
+// for that. Anything sustained above 20 ms genuinely is not keeping up.
+const GOV_SLOW_MS = 20;
+// Sustained below this => try recovering. Left at 12.5 ms on purpose even though
+// it is under the 60 Hz vsync floor and therefore unreachable on such a panel:
+// the probe is what recovers those devices. Every demotion records the EMA it was
+// made at and hands the rung straight back if the gain did not clear
+// GOV_MIN_GAIN, so a 60 Hz device that demotes for no benefit is returned within
+// a cooldown, and only a 120 Hz one can climb on this number alone.
+const GOV_FAST_MS = 12.5;
 // Hysteresis in SECONDS, not in frames. Frame counts are the wrong unit for a
 // governor that only ever engages on slow devices: 45 bad frames plus a
 // 120-frame cooldown is 2.7 s at 60 fps and 8.2 s at 20 fps, so the worse the
