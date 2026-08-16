@@ -608,9 +608,31 @@ const CLICK_SLOP = 5;
 // click on empty frame, and any rail entry.
 //
 // Wheel deltas are accumulated rather than acted on per event, because a
-// trackpad emits a stream of small ones for a single flick; the cooldown is what
-// stops that flick from racing through all eight.
-const CYCLE_WHEEL = 90; // accumulated deltaY for one step
+// trackpad emits a stream of small ones for a single flick.
+//
+// The cooldown alone was NOT enough to stop that flick racing through the stack,
+// and the way it failed is worth keeping written down. Deltas went on being
+// banked into the accumulator while the cooldown was refusing to act on them, so
+// a flick arrived at the far side of every cooldown already over the threshold
+// and stepped again immediately. The cooldown was rate-limiting the steps and
+// doing nothing at all about how many there would be: one flick walked 01 to 06.
+//
+// The fix is that HOW MUCH delta arrived cannot distinguish a deliberate second
+// step from the tail of the first — a trackpad keeps emitting for up to a second
+// after the fingers lift, and the tail is easily worth several thresholds. A GAP
+// can: putting the fingers down again, or a fresh wheel notch, always shows up as
+// a pause in the stream. So a quiet gap ends the gesture, and within one gesture
+// the second and later steps cost several times the first.
+const CYCLE_WHEEL = 90; // accumulated deltaY for the FIRST step of a gesture
+// What every step after it costs while the stream never pauses. Deliberately
+// steep: this is the number a momentum tail has to pay, and paying it once is
+// about as much as the strongest flick can manage. A held two-finger drag still
+// walks the stack, just at a rate a person can read.
+const CYCLE_WHEEL_REPEAT = 520;
+// Quiet that ends a gesture. Above the ~16 ms a trackpad streams at and above a
+// deliberate wheel notch's own spacing, below the gap between two separate
+// flicks.
+const CYCLE_GESTURE_GAP_MS = 140;
 const CYCLE_SWIPE = 60; // px of vertical drag for one step
 const CYCLE_COOLDOWN_MS = 340; // ~ the isolation cross-fade, so each part lands
 // The end of the finale on the axis the spring works in (`smooth` — progress with
@@ -1743,12 +1765,26 @@ function cadMaterials() {
       blendDst: THREE.OneMinusSrcAlphaFactor,
       blendSrcAlpha: THREE.OneFactor,
       blendDstAlpha: THREE.OneMinusSrcAlphaFactor,
-      // Depth ON for the solid variant, unlike the splats: this is solid geometry
-      // and the parts overlap. Writing depth while a whole layer fades UNIFORMLY
-      // can misorder a part against itself, which is invisible at uniform alpha
-      // and far cheaper than sorting 128k triangles.
+      // Depth ON for BOTH variants, unlike the splats: this is solid geometry and
+      // the parts overlap. Writing depth while a whole layer fades UNIFORMLY can
+      // misorder a part against itself, which is invisible at uniform alpha and
+      // far cheaper than sorting 128k triangles.
+      //
+      // It was `!peel`, and that is what made the landing a ghost. A dissolving
+      // layer is not a uniformly transparent one — it is a mostly-opaque surface
+      // with holes punched in it — so leaving depth unwritten did not buy correct
+      // ordering, it removed ordering altogether. During the finale EVERY layer is
+      // dissolving at once, so all eight blended in render order with nothing
+      // occluding anything: the cabinet went see-through, the parts inside it
+      // showed through its panels, and which surface won a pixel changed as the
+      // camera drifted. That is the flicker.
+      //
+      // The cost of writing it is that a fragment caught mid-band occludes what is
+      // behind it while still partly transparent. The band is a fraction of the
+      // surface at any moment and the error is one layer deep; the alternative was
+      // eight layers deep and moving.
       depthTest: true,
-      depthWrite: !peel,
+      depthWrite: true,
       // Backfaces culled, which halves the rasterisation of a million triangles.
       // This was DoubleSide, on the belief that decimated CAD shells could not be
       // trusted to be consistently wound. Measured, they nearly are — and the export
@@ -5291,50 +5327,86 @@ export default function ScrollScene({
     [parts.length]
   );
 
+  // Gesture state for the stack control. A ref and not effect-local bindings —
+  // see the note inside the effect, which is where it was costing a step every
+  // time the effect re-subscribed.
+  const cycState = useRef({ acc: 0, last: 0, lastEvent: 0, spent: false, sx: 0, sy: 0 });
+
   // While a part is open the wheel drives the stack, not the page. Bound on
   // window and non-passive so it can cancel the scroll wherever the pointer
   // happens to be — the caption and the rail sit over the canvas, and a wheel
   // event lands on whichever of them is under the cursor.
   useEffect(() => {
     if (opened < 0) return;
-    let acc = 0;
-    let last = 0;
-    let sx = 0;
-    let sy = 0;
+    // ALL of this lives in a ref, and that is the whole fix for the stack racing
+    // away under one flick.
+    //
+    // It used to be `let` bindings in this effect body, and `opened` is a
+    // dependency of the effect — so every successful step tore the effect down
+    // and built it again, which reset the accumulator, the gesture state AND
+    // `last`. Resetting `last` is the one that did the damage: it is the cooldown's
+    // own clock, so after the first step `now - last` was `now - 0`, the 340 ms
+    // cooldown never applied again, and the rest of the flick stepped at whatever
+    // rate the deltas arrived. Measured before the fix: one synthetic trackpad
+    // flick walked four subassemblies. That is the "01 suddenly to 06".
+    //
+    // A ref survives the re-subscribe, so the cooldown and the gesture both mean
+    // what they say.
+    const st = cycState.current;
 
     const fire = (dir: number) => {
       const now = performance.now();
-      if (now - last < CYCLE_COOLDOWN_MS) return false;
-      last = now;
-      acc = 0;
+      if (now - st.last < CYCLE_COOLDOWN_MS) return false;
+      st.last = now;
+      st.acc = 0;
       cycle(dir);
       return true;
     };
 
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
-      acc += e.deltaY;
-      if (Math.abs(acc) >= CYCLE_WHEEL) fire(Math.sign(acc));
+      const now = performance.now();
+      // A pause ends the gesture: the accumulator starts clean and the next step
+      // is cheap again. Everything else is still the same flick.
+      if (now - st.lastEvent > CYCLE_GESTURE_GAP_MS) {
+        st.acc = 0;
+        st.spent = false;
+      }
+      st.lastEvent = now;
+      st.acc += e.deltaY;
+      const need = st.spent ? CYCLE_WHEEL_REPEAT : CYCLE_WHEEL;
+      if (Math.abs(st.acc) < need) return;
+      // Spend it whether or not the cooldown lets this one through, and mark the
+      // gesture spent either way. Banking the overflow against a refusal is the
+      // second half of what let one flick walk the stack: the charge simply sat
+      // there and discharged the instant the cooldown lifted.
+      const dir = Math.sign(st.acc);
+      st.acc = 0;
+      st.spent = true;
+      fire(dir);
     };
     const onTouchStart = (e: TouchEvent) => {
       const t = e.touches[0];
       if (!t) return;
-      sx = t.clientX;
-      sy = t.clientY;
-      acc = 0;
+      st.sx = t.clientX;
+      st.sy = t.clientY;
+      st.acc = 0;
+      // A finger down is unambiguously a new gesture — there is no momentum tail
+      // to confuse it with, which is why touch never needed the gap test.
+      st.spent = false;
     };
     // Vertical only. A horizontal drag is the orbit's, and the canvas's own
     // pointer handler releases the vertical axis for exactly this.
     const onTouchMove = (e: TouchEvent) => {
       const t = e.touches[0];
       if (!t) return;
-      const dx = t.clientX - sx;
-      const dy = t.clientY - sy;
+      const dx = t.clientX - st.sx;
+      const dy = t.clientY - st.sy;
       if (Math.abs(dy) <= Math.abs(dx)) return;
       if (e.cancelable) e.preventDefault();
       // Up-swipe reads as "further down the stack", the same direction a wheel
       // down goes.
-      if (Math.abs(dy) >= CYCLE_SWIPE && fire(dy < 0 ? 1 : -1)) sy = t.clientY;
+      if (Math.abs(dy) >= CYCLE_SWIPE && fire(dy < 0 ? 1 : -1)) st.sy = t.clientY;
     };
     // Deliberately NOT Home/End/Space: those stay with the page, so a keyboard
     // is never without a way out that is not Escape.
