@@ -3,6 +3,7 @@ import { getMessages } from 'next-intl/server';
 import { notFound } from 'next/navigation';
 import { Inter, Anton, IBM_Plex_Mono, Noto_Sans_SC } from 'next/font/google';
 import { routing } from '@/i18n/routing';
+import { CAD_URL, CAD_INDEX_URL } from '@/lib/modelRev';
 import Header from '@/components/layout/Header';
 import Footer from '@/components/layout/Footer';
 import Grain from '@/components/motion/Grain';
@@ -76,6 +77,22 @@ export default async function LocaleLayout({
       suppressHydrationWarning
       className={`${inter.variable} ${anton.variable} ${plexMono.variable} ${notoHei.variable} ${notoHeiMid.variable}`}
     >
+      <head>
+        {/* Start the hero's geometry during HTML parse.
+            The scene fetches these from a useEffect in a 'use client' component,
+            so without this the transfer cannot begin until the JS bundle has
+            downloaded, parsed and hydrated — typically 1-3 s of a cold load, in
+            front of the one asset the hero is blank without. The document
+            already preloads four woff2 faces and did not preload this.
+            crossOrigin is REQUIRED and is not decoration: `as="fetch"` only
+            matches a later request whose CORS and credentials modes agree, and
+            "anonymous" is what a bare fetch(url) uses. Get it wrong and the
+            preload is discarded and the 4 MB downloads twice — which is worse
+            than not preloading at all. Verify in the network panel that the
+            second request is served from the preload cache. */}
+        <link rel="preload" href={CAD_URL} as="fetch" crossOrigin="anonymous" />
+        <link rel="preload" href={CAD_INDEX_URL} as="fetch" crossOrigin="anonymous" />
+      </head>
       <body className="min-h-screen flex flex-col bg-void text-smoke font-sans">
         <NextIntlClientProvider messages={messages}>
           <Header />

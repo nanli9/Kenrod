@@ -10,7 +10,8 @@
     "eyebrow": "Automatic Mahjong Tables",
     "subtitle": "Precision Engineering, Exceptional Quality",
     "scroll_hint": "Scroll to explore",
-    "loading": "Loading model"
+    "loading": "Loading model",
+    "skip": "Skip teardown"
   },
   "scroll_scene": {
     "layer0_title": "Entire Table",
@@ -32,7 +33,7 @@
     "layer8_title": "Power & Control",
     "layer8_text": "Toroidal transformer and the main board, in a shielded box slung under the deck.",
     "layer9_title": "Exploded View",
-    "layer9_text": "Every subassembly held at its own removal height. One folded steel datum, seven stacked systems, and the shell that closes over them.",
+    "layer9_text": "Every subassembly held at its own removal height. One folded steel datum, six stacked systems, and the shell that closes over them.",
     "inspect_hint": "Select a subassembly to inspect",
     "inspect_close": "Back to the full diagram",
     "inspect_rail": "Subassemblies",

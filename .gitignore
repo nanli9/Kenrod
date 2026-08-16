@@ -46,28 +46,33 @@ next-env.d.ts
 #
 # public/models/* is what the site SERVES, so none of it is ignored: the hero
 # cannot render without it and a clone of this repo has to be able to build and
-# deploy on its own. About 18 MB of binaries, which is deliberate. Rebuild with:
-#   node scripts/model-to-points.mjs assets/captures/cleanply/00_entire_table_clean.ply public/models/mahjong-points.bin 150000 --up z
-#   node scripts/build-layers.mjs
+# deploy on its own. 7.3 MB of binaries, which is deliberate. Rebuild with:
 #   /Applications/Blender.app/Contents/MacOS/Blender -b assets/cad/xuanyiji_master.blend -P scripts/build-cad-layers.py
 #
-# What IS ignored below is the two large SOURCE inputs, and one build
-# intermediate. None of the three lives outside this folder — nothing in the
-# project reads a path outside it — but none belongs in git history at its size,
-# and none is needed to build or serve the site, only to regenerate the binaries
-# above. Use Git LFS if the sources should be versioned.
+# It was 18 MB until the teardown moved off the 3DGS captures onto the CAD. The
+# gaussian payloads and the point cloud the wordmark used to be downloaded from
+# are gone; the hero now derives its particles from the same meshes it draws.
+#
+# What IS ignored below is the two large SOURCE inputs. Neither lives outside this
+# folder — nothing in the project reads a path outside it — but neither belongs in
+# git history at its size, and neither is needed to build or serve the site, only
+# to regenerate the binaries above. Use Git LFS if the sources should be versioned.
 
-# Source 3DGS captures, ~80 MB for the nine layers. See assets/captures/README.md.
+# Source 3DGS captures, ~80 MB. Nothing on the site reads these any more; they are
+# the input to scripts/build-layers.mjs, which no longer feeds anything.
+# See assets/captures/README.md.
 /assets/captures/cleanply/
 
 # Source CAD, ~233 MB. See assets/cad/README.md.
 /assets/cad/*.blend
 /assets/cad/*.blend[0-9]
 
-# Per-layer clouds, ~10 MB. build-layers.mjs writes these on its way to packing
-# layers-splats.bin, which is the only one the site fetches. The manifest beside
-# them is NOT ignored — `build-layers.mjs --index-only` reads it back.
-/public/models/layers/*.bin
-
 # Python bytecode from the Blender-side build scripts.
 __pycache__/
+
+# Precompressed copies of the model binaries, written by scripts/precompress.mjs
+# from `prebuild` and served by src/app/hero-model/[file]/route.ts. Derived bytes:
+# 4 MB of brotli plus 5 MB of gzip beside a 7.3 MB source is three copies of one
+# asset in git history, and `npm run build` regenerates them in 21 s.
+/public/models/*.br
+/public/models/*.gz

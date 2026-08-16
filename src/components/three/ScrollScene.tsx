@@ -3,53 +3,28 @@
 import { useRef, useState, useEffect, useMemo, useCallback } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three';
+import { CAD_URL, CAD_INDEX_URL } from '@/lib/modelRev';
 
-// The machine as nine captures in one file: the assembled table, then each
-// subassembly, all seated in a shared frame. The hero walks it a capture at a
-// time as the page scrolls. Written by scripts/build-layers.mjs; the index says
-// where each capture starts. Preferred source — the single-capture files below
-// still work and still give the old radial blast if this one is missing.
-// Cache-busting stamp on every model URL. These files are ~17 MB together and
-// they change only when their build script is re-run, so next.config.ts serves
-// them `immutable` for a year — which means a rebuilt binary at the same URL
-// would never be picked up. BUMP THIS whenever any .bin under public/models is
-// regenerated; it is the only thing that invalidates a returning visitor.
-const MODEL_REV = '1';
-const rev = (u: string) => `${u}?v=${MODEL_REV}`;
+// The machine, and the only geometry the hero downloads. The URLs and their
+// cache-busting stamp live in src/lib/modelRev.ts, because the locale layout
+// preloads the same bytes and the two must not be able to drift apart.
+//
+// It used to be one of three sources — nine 3DGS captures for the teardown
+// (9.93 MB), this for the closing diagram, and a single-capture fallback — and the
+// captures were 70% of the transfer, because float gaussian parameters have no
+// structure and brotli finds only 7% in them against 46% here. They were also the
+// wrong tool for the subject: a four-fold-symmetric machine of chrome, brushed
+// aluminium and painted plate is exactly where CAD is the better DATA, and every
+// weakness of a capture (specular metal, thin structure, perforation, occluded
+// interior) bites at once. So the teardown moved onto these meshes, and the word's
+// particles are now sampled off their surface rather than downloaded beside them.
 
-const LAYERS_URL = rev('/models/layers-splats.bin');
-const LAYERS_INDEX_URL = rev('/models/layers-index.bin');
-
-// The closing exploded diagram, as CAD rather than as captures. The walk through
-// the machine is photoreal because that is what gaussians are for; the diagram is
-// the opposite job — it exists to be READ, and eight photogrammetric captures
-// stacked and viewed small are soft coloured blobs, because that is what a
-// capture trained on one part in isolation looks like from three metres away.
-// This is the same geometry the reference render was made from: crisp edges,
-// exact proportions, the SolidWorks colours. Written by
-// scripts/build-cad-layers.py; the sidecar carries the CAD explode offsets, so
-// the diagram's layout comes out of the file rather than being guessed here.
-// Optional — if either half is missing the hero simply ends on the walk.
-const CAD_URL = rev('/models/cad-layers.bin');
-const CAD_INDEX_URL = rev('/models/cad-layers-index.bin');
-
-// Real gaussians from a 3DGS capture: 32 bytes/splat (pos, scale, rgba, quat).
-// Written by scripts/model-to-points.mjs from a .ply.
-const SPLAT_URL = rev('/models/mahjong-points-splats.bin');
-// Fallback for the CAD STL, which has no gaussian params: plain Float32 xyz.
-// Those get synthesised into small isotropic gaussians + a steel height gradient
-// so both sources feed the same splat renderer.
-const POINTS_URL = rev('/models/mahjong-points.bin');
-
-// 150k splats is a desktop budget: alpha-blended overdraw plus a per-frame depth
-// sort. Small screens get a prefix of the cloud (file order is not spatially
-// sorted, so a prefix is an even subset).
+// How many points are sampled off the machine's surface to make the wordmark.
+// A desktop budget: alpha-blended overdraw plus a per-frame depth sort. This is no
+// longer tied to anything in a file — the particles are generated, so the number
+// is a free choice about how fine the lockup's grain should be.
 const MAX_SPLATS_DESKTOP = 150000;
 const MAX_SPLATS_MOBILE = 40000;
-// Per capture, when the cloud is a sequence. Phones keep every capture but at a
-// lower density — the whole sequence is ~325k splats and the float texture that
-// backs it would be ~42 MB at full quality.
-const PER_LAYER_MOBILE = 14000;
 
 // ------------------------------------------------------------- render scale
 // This pass is fill-rate bound and nothing else. Every gaussian is an
@@ -155,15 +130,15 @@ const HERO_VH = 940;
 // because the timeline used to be four hand-tuned numbers in progress space that
 // had to be kept consistent by arithmetic — and they had drifted into a
 // distribution nobody would have chosen on purpose: the word's one-off morph
-// into the table ate 30% of the page (122vh) while each of the nine captures
-// got 22vh, less than a mouse-wheel flick per subassembly.
+// into the table ate 30% of the page (122vh) while each subassembly got 22vh,
+// less than a mouse-wheel flick apiece.
 //
 // At HERO_VH = 940 (840vh of actual scrolling) this is:
 //   word    61vh   the lockup, held readable
 //   morph   72vh   lockup -> assembled table (was 122vh; it is one transition,
 //                  it does not deserve more room than four subassemblies)
 //   table   54vh   the whole machine, before it comes apart
-//   walk   468vh   the teardown: nine captures -> 52vh each, half hold, half
+//   walk   468vh   the teardown: eight layers -> 59vh each, half hold, half
 //                  removal
 //   finale  65vh   the parts settle into the exploded diagram
 //   hold   120vh   the diagram is finished and NOTHING animates
@@ -203,18 +178,15 @@ const MORPH_START = ASSEMBLE_END + SCROLL_SPAN * B_WORD;
 // so the budget buys window * (1 + stagger). The stagger has to be a FRACTION of
 // the window, not the flat 0.08 it was: shortening the morph left a fixed 0.08
 // tail covering most of it, and the word came apart in a mush instead of a
-// ripple. Two things downstream need to know where that tail ends — the capture
-// walk must not start inside it, and past it the depth sort can skip the whole
-// three-stage lerp.
+// ripple. Where that tail ends is what the teardown starts after, and it is also
+// where the last particle finishes handing the machine over to its own geometry
+// (see SOLID_END).
 const MORPH_STAGGER = 0.28;
 const MORPH_WINDOW = (SCROLL_SPAN * B_MORPH) / (1 + MORPH_STAGGER);
 const MAX_MORPH_DELAY = MORPH_WINDOW * MORPH_STAGGER;
 const MORPH_END = MORPH_START + MORPH_WINDOW;
-// Single-capture fallback only (the .ply path has nothing to walk through, so it
-// still ends on the radial blast). Placed where the walk would otherwise be.
-const BLAST_START = MORPH_END + MAX_MORPH_DELAY + SCROLL_SPAN * (B_TABLE + B_WALK * 0.45);
 
-// Model-hold framing. The capture is a table: everything worth showing — the
+// Model-hold framing. The subject is a table: everything worth showing — the
 // playfield, the dealing well, the tiles — is on TOP, so the group pitches
 // forward to put the camera ~45 degrees above it. A *negative* pitch here left
 // the hero parked under the table looking at its underside and legs.
@@ -223,11 +195,8 @@ const BLAST_START = MORPH_END + MAX_MORPH_DELAY + SCROLL_SPAN * (B_TABLE + B_WAL
 const MODEL_PITCH = 0.75; // rad (~43 deg) of look-down at the playfield
 const MODEL_YAW = 0.4; // rad off-axis, so it reads 3/4 rather than flat-on
 // Swept across the hold: a drift that shows the table has depth. This was a
-// full Math.PI, which spun the capture right past its good side.
+// full Math.PI, which spun the machine right past its good side.
 const MODEL_TURN = 0.55;
-// Pitched 43 deg the table's silhouette is ~6.4 world units against a ~7-unit
-// frustum at the zoom peak, and the near legs magnify past that. Fit it.
-const MODEL_FIT = 0.88;
 // Half the visible height at the model plane with the camera at rest (z = 10,
 // fov 50). The rig dollies IN from here and never out, so sizing travel against
 // this is the conservative case: a part that clears the frame at rest clears it
@@ -236,169 +205,128 @@ const MODEL_FIT = 0.88;
 const CAM_HALF_H = Math.tan((50 * Math.PI) / 360) * 10;
 
 // Layer walk. Once the word has become the assembled table, the rest of the
-// scroll steps through the captures: 00 (whole machine) -> 01 -> ... -> 08.
-// Only one is ever on screen, so each renders at the capture's full quality.
-// Starts after the LAST splat has finished morphing, plus the table beat: the
-// morph and the walk used to overlap by a whole morph delay, so captures 01 and
-// 02 began coming apart while the word was still assembling into the table.
-// Separating them also buys the assembled machine a moment of being whole
-// before it is taken apart, and lets the depth sort take its fast path across
-// the entire walk (nothing is mid-morph there, so the lerp is dead weight).
-const SEQ_START = MORPH_END + MAX_MORPH_DELAY + SCROLL_SPAN * B_TABLE;
+// scroll takes it apart a layer at a time: beat k removes layer k and holds
+// everything below it seated, so what is on screen is always the real machine
+// minus what has already come off.
+// Starts after the LAST particle has finished morphing, plus the table beat: the
+// morph and the walk used to overlap by a whole morph delay, so the first two
+// layers began coming apart while the word was still assembling into the table.
+// Separating them also buys the assembled machine a moment of being whole before
+// it is taken apart.
+const WALK_START = MORPH_END + MAX_MORPH_DELAY + SCROLL_SPAN * B_TABLE;
+// The table beat itself, as a span, because two things ramp across it — the
+// caption column's reservation and the walk's emphasis — and both want the model
+// to have settled before the first caption arrives. Guarded because it is a
+// denominator and B_TABLE is editable at the top of the file.
+const TABLE_SPAN = Math.max(1e-6, WALK_START - MORPH_END);
 // Where the teardown ends and the closing diagram begins. The walk used to run
-// to p = 1, which is also why the last capture never got a beat of its own: the
+// to p = 1, which is also why the last layer never got a beat of its own: the
 // walk position only reached it at the very last pixel of the page.
-const SEQ_END = SEQ_START + SCROLL_SPAN * B_WALK;
-// Fraction of each capture's scroll spent handing over to the next; the rest is
-// a hold where one capture sits alone and readable.
-const SEQ_TRANSITION = 0.5;
-// The active capture is scaled to roughly fill the frame — the subassemblies
-// range from the whole 5-unit table down to a 1.1-unit control column, and at
-// true relative size the small ones would be specks. Clamped, because scaling a
-// small capture up too far just magnifies its own sparsity.
-// Fitted on the larger half-extent, not the bbox diagonal: a diagonal
-// under-scales anything narrow, which left the control column at a third of the
-// frame while the table filled it.
-const SEQ_FRAME_RADIUS = 2.3;
-const SEQ_ZOOM_MIN = 0.85;
+const WALK_END = WALK_START + SCROLL_SPAN * B_WALK;
+// Fraction of each layer's beat spent on its removal; the rest is a hold where
+// the machine sits still and readable.
+const WALK_TRANSITION = 0.5;
+// Bounds on the fit — the walk's and the finale's, since both run the same
+// two-constraint fit against the same clear band. Every beat is fitted to the band
+// and the usable width live, so these only stop that fit running away at the
+// extremes: the whole assembled table at one end, a 1.1-unit electronics box at
+// the other, which at true relative size would be a speck.
+//
+// The floor was 0.85, from the era when the fit was a constant frame radius that
+// under-measured the pitched table by 21%. Fitted honestly the assembled machine
+// wants ~0.80, so 0.85 was a clamp that put the near legs back into the bottom
+// gradient — the exact overflow the band fit exists to remove. In practice only
+// the walk ever reaches down to it; the finale's stack is always the taller
+// subject.
+const FIT_ZOOM_MIN = 0.75;
 // Ceiling on that fit. This used to be 1.5, and the reason was that a bigger
 // number meant the two small subassemblies (the control column, the electronics
-// box) rescaled the group ~2.9x against their neighbours WHILE its splats were
-// dispersing — far and away the most jarring thing in the walk. The fix then was
-// to cap the zoom and accept that the small parts read small.
-// FRAME_LAG removes the cause instead: the dolly now runs over a capture that is
+// box) rescaled the group ~2.9x against their neighbours WHILE they were coming
+// apart — far and away the most jarring thing in the walk. The fix then was to cap
+// the zoom and accept that the small parts read small.
+// FRAME_LAG removes the cause instead: the dolly now runs over a machine that is
 // standing still, never over one in motion, so a larger swing costs nothing. The
 // cap can go back to framing the part rather than protecting the handoff.
-const SEQ_ZOOM_MAX = 2.2;
-// Share of a capture's beat over which the framing drifts to the next one.
-// Deliberately much wider than SEQ_TRANSITION: the splats hand over quickly,
-// but a dolly wants to be slow, and nothing says the two have to agree. At 0.85
-// the zoom change is spread over ~45vh of scroll instead of ~26vh.
-const SEQ_FRAME_EASE = 0.85;
-// Where that dolly starts, as a share of the beat. SEQ_TRANSITION (0.5) is where
+const FIT_ZOOM_MAX = 2.2;
+// Share of a beat over which the framing drifts to the next one. Deliberately
+// much wider than WALK_TRANSITION: a layer comes off quickly, but a dolly wants to
+// be slow, and nothing says the two have to agree. At 0.85 the zoom change is
+// spread over ~50vh of scroll instead of ~29vh.
+const WALK_FRAME_EASE = 0.85;
+// Where that dolly starts, as a share of the beat. WALK_TRANSITION (0.5) is where
 // the removal begins, so this releases the camera at the same moment and lets it
-// finish well into the next capture's hold. See the framing block in useFrame
+// finish well into the next layer's hold. See the framing block in useFrame
 // for why it must not run any earlier.
 const FRAME_LAG = 0.55;
 
-// ---------------------------------------------------------------- teardown
-// How one capture becomes the next. The walk is NOT a sequence of swaps: it is
-// one continuous CAD explode. Scrolling REMOVES the layer on screen, and the
-// next capture is what was underneath it the whole time — which is literally
-// true, because all nine captures are seated in one shared world frame.
+// ---------------------------------------------------------------- the peel
+// How much of the detail channel is dissolving at any one moment, and the
+// per-fragment jitter mixed into it.
 //
-// The two halves of a handoff are deliberately asymmetric, and that asymmetry is
-// the entire fix. The old version was a symmetric particle swap: both captures
-// in flight at once, both at half alpha, every gaussian in both inflated and
-// smeared, escaping radially with a swirl and an arc. Nothing was ever at rest,
-// the scatter was unbounded in screen terms (splats crossed the whole page), and
-// every handoff had the same vortex shape regardless of what the parts were.
+// The band is a trade with one obvious wrong answer on each side: WIDE means most
+// of the layer sits at partial alpha at once, which is mottle; NARROW means each
+// patch of surface clears cleanly and what you actually see is the ORDER it goes
+// in — which is the effect. Kept small for that reason, and the grain is what
+// keeps a narrow band from reading as a contour map on the plates whose triangles
+// came out uniform.
+const PEEL_BAND = 0.16;
+const PEEL_GRAIN = 0.22;
+// Where the surviving tracery starts to rise, as a share of the removal, and how
+// far it goes in frame-heights. Deliberately late: the part has to be properly
+// porous before it moves, or an opaque shell drags across the layer it is meant
+// to be revealing — a removal that starts travelling while it is still solid
+// covers the thing it is supposed to be uncovering for most of the beat.
+const PEEL_LIFT_START = 0.55;
+const PEEL_LIFT_FRAMES = 0.85;
+// The walk's emphasis on the layer that is about to come off. Reuses the
+// diagram's EXPOSURE channels, at a fraction of their strength: the hover's own
+// acid rim is an interface pointing at something, whereas this is just the eye
+// being told where the next move happens. The dim is deliberately light —
+// pushing seven layers all the way to CAD_DIM_GAIN, which is what the pointer
+// spends, turns the machine into a silhouette.
 //
-// The second version was better but still did not earn the pipeline. It moved a
-// part rigidly and cross-blurred the next one in, and BOTH of those are things a
-// mesh can do — a rigid translate is a rigid translate, and "blurry then sharp"
-// is a depth-of-field pull or a two-pass blur. It also looked bad for the same
-// reason: mid-handoff the frame held a solid opaque blob over a blurry mass, two
-// unresolvable things at once, with no sharp anchor anywhere.
+// The rim is deliberately NOT reused, which is why uHot and uAccent are separate
+// uniforms. On the walk nothing has been selected and there is no pointer, so an
+// acid outline around the next layer is a CAD-viewer selection highlight sitting
+// on a product shot — precisely the reading this whole beat is trying to escape.
+const WALK_HOT = 0.45;
+const WALK_DIM = 0.3;
+// How far the emphasis reaches from the front, in beats. Under 1 so a layer is
+// never lit and pushed back at once, and wide enough that the handover between
+// two neighbours takes most of a removal rather than snapping at the boundary.
+const WALK_EMPH_REACH = 0.6;
+
+// What uHot and uDim spend at full strength — the pointer's own amounts, which the
+// walk borrows a fraction of through the two constants above. Named here rather
+// than buried in CAD_FRAG because they are the same kind of decision as WALK_HOT
+// and WALK_DIM and want to be read next to them.
 //
-// What a mesh genuinely cannot do is the thing this capture format hands us for
-// free: EVERY PRIMITIVE HAS A SIZE, AND THAT SIZE MEANS SOMETHING. A 3DGS
-// optimiser spends large gaussians on flat, low-frequency area — painted panels,
-// skirts, the featureless outer skin — and small ones on high-frequency detail:
-// edges, seams, fastener heads, printed marks. So gaussian scale is a free
-// per-primitive frequency channel, already in the file, needing no analysis.
-//
-// Key opacity to it and a part does not fade, it SKELETONISES. Its surfaces
-// evaporate biggest-first while its detail persists, so the shell opens into a
-// tracery of its own edges and the mechanism inside shows through the holes. No
-// mesh has an equivalent: a triangle has no frequency, and "dissolve the flat
-// regions of this surface but keep the detailed ones, in 3D, as geometry" is not
-// expressible. Nor is it a texture effect — the surviving detail has to still be
-// there in space, occluding and being occluded, not painted on.
-//
-// Now:
-//   LEAVING  the part evaporates IN PLACE, biggest gaussians first, deflating as
-//            it goes — so it stops occluding before it starts moving. What is
-//            left is a sparse constellation of its own detail, and only that
-//            rises out of frame, streaked along its travel.
-//   ARRIVING the part does not move and never blurs. It is always at its true
-//            covariance, in focus, from the first splat. What ramps is how many
-//            of its gaussians EXIST: it densifies coarse-to-fine, the way the
-//            capture was actually trained. A mesh cannot be 30% of itself.
-//
-// So mid-handoff the frame holds one sharp, readable object with a thinning veil
-// of the previous one over it. Nothing is ever unresolvable, and the reveal is
-// caused by the shell above it becoming porous rather than by a cross-fade.
-//
-// Baked into the splat texture (changing these needs a reload, not a uniform):
-// How far a part travels to leave, measured in frame-heights of ITS OWN framing.
-// Not in layer radii: each capture is zoomed to fill the frame (SEQ_ZOOM_*), so
-// "three radii" clears the viewport for the whole 5-unit table and does not come
-// close for the 1.2-unit control column magnified 1.5x.
-const SEQ_EXIT_FRAMES = 1.0;
-const SEQ_HEIGHT_BIAS = 0.85; // 0 = pure grain, 1 = a hard top-down order
-// How much of the travel is already moving at t=0. A pure square (0 here) is
-// what a part being released looks like, but it also means the part has covered
-// only a quarter of its exit at the midpoint of the handoff — so it sits on top
-// of the layer it is supposed to be revealing for most of the beat. Launching
-// with real velocity and easing up from there keeps the "pulled by a jig" read
-// and gets the part out of the way in time to see what is underneath.
-const SEQ_LAUNCH = 0.4;
-// Live uniforms — the evaporation:
-// Share of the removal over which the shell has fully evaporated. Well before
-// the end, because the lift of the leftover skeleton has to happen inside the
-// same beat.
-const SEQ_EVAP_END = 0.82;
-// Spread of the per-splat evaporation. This is the knob that decides whether the
-// part reads as skeletonising or as fading: at 0 every gaussian goes at once (a
-// plain fade), at 1 the biggest is gone before the smallest has started.
-// It also sets each individual splat's fade window, which is 1 minus this — and
-// that coupling is the reason to keep it high. A wide window means most of the
-// cloud sits at partial alpha simultaneously, which is mottle; a narrow one means
-// each gaussian winks out cleanly and what you see is the ORDER, which is the
-// effect. 0.85 fades a splat over 15% of the beat and spreads the sizes across
-// the other 85%.
-const SEQ_EVAP_STAGGER = 0.85;
-// How much top-down ordering is mixed into the size ranking. Kept low on
-// purpose — the size signature IS the effect, and blending much scan into it
-// turns a frequency dissolve back into a wipe.
-const SEQ_EVAP_SCAN = 0.28;
-// How far a gaussian shrinks as it evaporates. Without this the big ones bloat
-// into soft clouds on their way out and the shell fogs over instead of opening.
-const SEQ_DEFLATE = 0.75;
-// Where the leftover skeleton starts to rise, as a share of the removal. After
-// the evaporation is well under way, so the part is already porous when it moves
-// and never drags an opaque mass across the layer it is revealing.
-const SEQ_LIFT_START = 0.42;
-const SEQ_PEEL = 0.14; // share of the lift spent on the top-first peel
-const SEQ_SMEAR = 1.5; // motion streak along the travel direction, in multiples
-// The arrival:
-const SEQ_REVEAL = 0.62; // share of the arrival spent on the densification
-const SEQ_DENS_SCAN = 0.35; // its split: size rank vs top-down scan line
-const SEQ_GRAIN = 0.25; // per-splat noise on both, so neither is a hard wipe
-// Brand acid on the gaussians mid-evaporation. Kept low: three of these captures
-// are largely green felt already, so a heavier acid mix does not read as a front
-// sweeping the part, it just oversaturates what is already there.
-const SEQ_TINT = 0.09;
-// Floor on the density LOD at the deepest point of a handoff. Two captures are
-// on screen there, so it is still the busiest frame in the beat — but far less so
-// than it used to be, because nothing inflates any more: the leaving part is
-// shrinking and thinning the whole way out. This floor is only ever reached by
-// splats that HAVE the alpha headroom to pay it back (see the shader).
-const SEQ_LOD_MIN = 0.42;
-// Shapes the LOD across the handoff. Below 1 it drops early and stays low
-// rather than dipping only at the midpoint — the fill peak is not at the
-// midpoint but around 0.7, where gaussians are large and still bright.
-const SEQ_LOD_CURVE = 0.6;
+// Both are EXPOSURE, which is the only place a highlight or a push-back can be
+// applied without lying about the material — see the note where they are spent. A
+// third of a stop up, and a shade over two stops down.
+const CAD_HOT_GAIN = 1.22;
+const CAD_DIM_GAIN = 0.2;
+// The dim desaturates on top of that, because exposure alone was not separation
+// enough on a layer that is mostly one saturated colour: AgX protects a primary on
+// purpose, so the felt stayed the loudest thing on screen two stops down.
+const CAD_DIM_DESAT = 0.72;
+// Strength of the hover's fresnel rim, added in display space.
+const CAD_RIM_GAIN = 0.85;
+// Two BRDF limits that happen to share a number and mean different things, which
+// is exactly why they are two names. The first is a floor on roughness; the second
+// is a ceiling on how much the specular-antialiasing pass may add to it, in
+// alpha-squared. See where each is spent in CAD_FRAG.
+const CAD_ROUGH_MIN = 0.045;
+const CAD_SPEC_AA_MAX = 0.045;
 
 // ------------------------------------------------------------------ finale
-// After the last capture the teardown resolves into the reference drawing: every
+// After the last layer the teardown resolves into the reference drawing: every
 // subassembly descends from wherever the walk parked it onto its own seat on the
 // explode axis, and the whole exploded machine is held as the closing shot.
 //
-// The seats come from the CAD. layers.json carries each layer's real explode
-// offset (the cabinet lifts 3.43 m, the chassis 0.265 m) because the cabinet
-// genuinely has to clear everything under it. Taken literally that stack is 17.7
+// The seats come from the CAD. cad-layers-index.bin carries each layer's real
+// explode offset (the cabinet lifts 3.43 m, the chassis 0.265 m) because the
+// cabinet genuinely has to clear everything under it. Taken literally that stack is 17.7
 // units tall against a 5-unit-wide table — a diagram no screen can hold — so the
 // CAD's proportions are blended toward even spacing by stack index. That
 // compresses it without flattening it, and guarantees no two layers land inside
@@ -427,22 +355,83 @@ const FINALE_EVENNESS = 0.65;
 const CAD_EXPOSURE = 7.0;
 const CAD_AMBIENT = 0.28;
 const CAD_AO = 0.85;
+// Share of the baked occlusion the DIRECT lights pay. Low here on purpose: the
+// diagram pulls the layers 1.8 m apart, so most of what the bake records is
+// self-shadowing inside a part that is no longer inside anything.
+const CAD_AO_DIRECT = 0.35;
+
+// The same four, for the WALK — and they are a genuinely different lighting
+// condition, not a stylistic variant. Everything above was fitted against a
+// Cycles render of the EXPLODED stack, seen at FINALE_PITCH (0.34 rad) with its
+// layers metres apart in open air. The walk shows the same materials ASSEMBLED,
+// close up, at MODEL_PITCH (0.75 rad), which fills the frame with up-facing
+// surfaces — and all four LDIR entries have positive Y, so nearly every pixel is
+// lit by nearly every light. Measured over model pixels the assembled table ran
+// p25 184 / p50 189 / p75 197: a thirteen-code interquartile spread against the
+// finale's ninety-three. Not a dark picture with the wrong mean, a picture with
+// no range in it at all — the deck read as a flat plate of paint.
+//
+// So these open the RANGE rather than move the level, and in the order they
+// matter. The direct AO share is the one that reopens the shadows: spending only
+// a third of the bake on direct light switches off the one channel that can put a
+// contact shadow under the rings, on the beat where direct light is the whole
+// image. Ambient is a near-constant pedestal — at 0.28 it alone puts a 0.6-albedo
+// grey at 172/255 before a single lamp is counted, which is a floor the frame can
+// never get below. Exposure moves least, because it is not the problem: measured,
+// lowering it makes the paints MORE saturated, since AgX's chroma rolloff only
+// engages once a channel is up its curve. Saturation is fixed at the palette
+// instead (see the paint grade in parseCadLayers).
+//
+// Guesses fitted by eye against the same statistic, not against a render: there
+// is no Cycles frame of the assembled machine at this pitch to match to. Making
+// one is the right next move, and until then the finale's numbers are the ones
+// with authority — which is why the crossfade below is exact at fe = 1.
+const WALK_EXPOSURE = 6.0;
+const WALK_AMBIENT = 0.16;
+// (uAo and uAoDirect below.)
+//
+// ---------------------------------------------------------------- the accent
+// The site's one loud colour, in the three spaces this scene needs it in. Kept as
+// one declaration because three spellings of one colour is three chances for it to
+// drift apart, and it had: the same #c6ff00 was written as a hex string in the
+// particle palette, as display floats in the hover rim and as linear floats in the
+// paint grade.
+//
+// Which space a use wants is not a style choice. ACCENT_LINEAR is scene radiance,
+// for anything that will be tone-mapped — the felt's albedo. ACCENT_SRGB is
+// display-referred, for anything added AFTER the view transform: the hover rim is
+// an interface pointing at something, not light, and pushing it through AgX would
+// drag it toward white and land it as a wash instead of an edge.
+const ACCENT_HEX = '#c6ff00';
+const ACCENT_SRGB: readonly [number, number, number] = [0.776, 1.0, 0.0];
+const ACCENT_LINEAR: readonly [number, number, number] = [0.5647, 1.0, 0.0];
+
+// Full strength, unlike the diagram's 0.85. The bake is physically complete and
+// the walk is the condition it actually describes: a machine with its layers
+// stacked inside each other, where the occlusion between them is real.
+const WALK_AO = 1.0;
+const WALK_AO_DIRECT = 0.75;
 const FINALE_STAGGER = 0.55; // share of the beat spent on the bottom-up landing
 const FINALE_PITCH = 0.34; // rad — flatter than the walk, so the stack separates
 const FINALE_TURN = 0.45; // rad of extra yaw across the beat
-// Share of the clear band the diagram fills. It can sit this high because the
-// band below already holds the whole safety margin — doubling up just left the
-// closing shot small in a mostly empty frame.
-const FINALE_MARGIN = 0.95;
+// -------------------------------------------------------------- the frame
+// The clear band and the margin the subject is fitted into. Named for the frame
+// rather than for a beat because BOTH the walk and the finale fit to them: they
+// were the finale's alone, on the belief that the walk's subjects were centred and
+// no taller than the clear middle, and they are not.
+//
+// Share of the clear band the subject fills. It can sit this high because the band
+// itself already holds the whole safety margin — doubling up just left the closing
+// shot small in a mostly empty frame.
+const FIT_MARGIN = 0.95;
 // The sticky canvas is not all usable. A fixed 7rem gradient (plus the nav) caps
 // the top and a fixed 8rem one caps the bottom — see the vignette element — and
-// anything under them is invisible whatever the frustum says. The walk never
-// noticed because its captures are centred and no taller than the clear middle;
-// an eleven-unit stack of parts absolutely does, and fitting it to the raw
-// frustum is what put the outer cabinet behind the navigation. In px, because
-// that is what the gradients are authored in.
-const FINALE_BAND_TOP = 112;
-const FINALE_BAND_BOTTOM = 128;
+// anything under them is invisible whatever the frustum says. At MODEL_PITCH the
+// assembled table projects 3.15 units of half-height, and fitting it to the raw
+// frustum ran its near legs into the bottom gradient. In px, because that is what
+// the gradients are authored in.
+const BAND_TOP = 112;
+const BAND_BOTTOM = 128;
 // The horizontal counterpart, and for the same reason: on md+ screens the caption
 // column sits BESIDE the model, so the frustum's left edge is not the left edge of
 // the usable frame either. Reserving only the top and bottom was enough while the
@@ -460,29 +449,36 @@ const FINALE_BAND_BOTTOM = 128;
 // reproducing that arithmetic in the frame loop would be a second source of truth
 // that silently rots the first time the caption's classes change.
 const CAPTION_GUTTER = 28; // px of air between the text and the nearest geometry
-// How far above its seat each part starts its descent, in world units. It does
-// not have to clear the frame, because the part fades in over the same window —
-// a long travel from off-screen just makes the landing feel slow.
-const FINALE_DROP = 5.5;
-// Where the walk's last capture has finished dissolving out, as a share of the
-// finale. The photoreal capture and the CAD occupy the same world frame (the
-// captures were placed using the CAD's own subject centres), so this is a
-// register-true cross-dissolve from the real thing to its drawing rather than a
-// cut. Short, because the two look nothing alike and lingering reads as a ghost.
-const FINALE_HANDOVER = 0.42;
-// The diagram used to be drawn from the splats themselves, which meant the
-// closing frame carried all eight captures at once — ~290k splats, by far the
-// most expensive frame in the hero, and it needed a whole mip-style LOD (inflate
-// the gaussians, thin the count, conserve the ink) just to be affordable. Drawing
-// it from CAD instead deletes that problem rather than managing it: 128k
-// triangles, one draw call a layer, and the walk's splat span never has to grow
-// past the two captures it already holds.
+// Where the closing diagram takes the frame over, as a share of the finale, and
+// all this now decides is when the canvas switches to the diagram's much larger
+// pixel budget. The particles it used to cross-dissolve against are long gone by
+// here — they hand over to the mesh at SOLID_END, at the end of the MORPH — so
+// this is a threshold on cost, not on the picture. It stays well clear of the one
+// that switches back, because flipping it resizes the drawing buffer.
 //
+// The diagram used to be drawn from the gaussians themselves, which meant the
+// closing frame carried all eight captures at once — ~290k splats, by far the most
+// expensive frame in the hero, and it needed a whole mip-style LOD (inflate the
+// gaussians, thin the count, conserve the ink) just to be affordable. Drawing it
+// from CAD deletes that problem rather than managing it: one draw call a shape, on
+// the one beat where the cloud is not drawn at all.
+const FINALE_HANDOVER = 0.42;
+
+// Share of the morph beat over which the particles hand the machine over to its
+// own geometry. The word's dust flies to points sampled ON the CAD surface, so at
+// the moment of handover the two are in register to within a particle's width and
+// the swap reads as the dust SOLIDIFYING rather than as a cross-fade of two
+// different objects. Runs to the end of the morph's stagger tail, so the mesh is
+// fully up only once the last particle has landed.
+const MORPH_SOLIDIFY = 0.45;
+const SOLID_START = MORPH_START + (MORPH_END - MORPH_START) * (1 - MORPH_SOLIDIFY);
+const SOLID_END = MORPH_END + MAX_MORPH_DELAY;
+
 // Where the landing finishes. Everything past this is the hold beat, and the
 // distinction has to be explicit: `fe` used to be measured against the end of the
 // PAGE, so adding a hold beat would silently have stretched a 65vh landing into a
 // 185vh one instead of leaving the diagram alone at the end of it.
-const FINALE_END = SEQ_END + SCROLL_SPAN * B_FINALE;
+const FINALE_END = WALK_END + SCROLL_SPAN * B_FINALE;
 
 // ------------------------------------------------------------- inspection
 // The hold beat is interactive: hovering a subassembly lights it and drops the
@@ -500,6 +496,16 @@ const FINALE_END = SEQ_END + SCROLL_SPAN * B_FINALE;
 const INSPECT_AT = 0.98; // `fe` past which the diagram accepts a pointer
 // How fast the isolation blend and the orbit follow. Both are dampings per
 // second, not per frame — see damp().
+// What the wordmark must stay clear of, in CSS px off each edge of the viewport.
+// The top is the fixed nav plus its own gradient; the bottom is the hero copy
+// block, which is bottom-anchored (pb-16/pb-20) and runs eyebrow, subtitle, then
+// the scroll cue and its rule. Authored in px because the overlays are, and
+// generous at the bottom on purpose — the CJK lockup's secondary line is set
+// larger than the latin one, so the case that collides first is the one whose copy
+// is also tallest.
+const LOCKUP_BAND_TOP = 96;
+const LOCKUP_BAND_BOTTOM = 248;
+
 const FOCUS_RATE = 6;
 const ORBIT_RATE = 9;
 // Ceiling on the focus zoom, as a MULTIPLE of the whole-diagram framing rather
@@ -507,7 +513,33 @@ const ORBIT_RATE = 9;
 // whole table, the electronics box is a third of it), so an absolute cap would
 // either crop the big ones or leave the small ones tiny — and it would silently
 // mean something different the first time FINALE_SPAN or the CAD bounds change.
-const FOCUS_GAIN_MAX = 3;
+//
+// It is a BACKSTOP, not the framing. The real framing is the geometric term it is
+// min()'d against — the layer's bounding sphere fitted into the clear band — and
+// at 3 this backstop was overriding it on exactly the parts that most needed the
+// magnification: measured against the current bounds, the electronics box wanted
+// 3.7 and was held to 2.2, so opening the smallest subassembly in the machine
+// filled a third of the frame it could have filled. The big layers were always
+// bound by the geometric term and are unaffected. Raised until the geometry wins
+// for every layer, which is what "fit the part to the frame" should have meant.
+const FOCUS_GAIN_MAX = 5;
+// How far the isolated part is allowed to overflow its own bounding sphere.
+//
+// The sphere is what makes the framing rotation-invariant — see ORBIT_PITCH_MAX —
+// but it is a loose bound for everything in this machine, because every layer is a
+// flat plate or a stack of discs and none of them come close to filling the sphere
+// that contains them. Fitted strictly, the electronics box measured 361 px into a
+// 560 px band: two thirds of the frame it had, on the beat whose entire purpose is
+// looking closely at one part.
+//
+// So the sphere is allowed past the band by this much. What it costs is the strict
+// guarantee, and what it buys back is that the guarantee was never doing any work:
+// no layer's real geometry reaches its sphere in the first place, so overflowing
+// the sphere by 40% still leaves the part itself comfortably inside the frame — at
+// every yaw, which is the property that mattered. Keep it modest for the layer that
+// comes closest to spherical (the centre column) rather than tuning it to the
+// flattest one.
+const FOCUS_FILL = 1.4;
 // Radians per pixel of drag, and the pitch stop. Pitch is clamped because there
 // is no floor and no sky in this scene: turned past about a third of a turn the
 // part is lit from underneath by a rig that assumes it never would be.
@@ -546,6 +578,24 @@ const CYCLE_COOLDOWN_MS = 340; // ~ the isolation cross-fade, so each part lands
 // the intro's fixed share divided back out), which is what the camera dolly and
 // anything else driven off the spring rather than off `p` has to stop at.
 const DOLLY_END = (FINALE_END - ASSEMBLE_END) / SCROLL_SPAN;
+// How much raw scroll the SKIP control fades over, ending exactly at DOLLY_END.
+// Progress and raw scroll differ by a constant factor that the beat shares cancel,
+// so a beat's share IS its width on the raw axis — this is the whole landing:
+// full strength through the teardown it offers an escape from, and gone by the
+// time the diagram is finished and the prompt to point at it arrives.
+const SKIP_FADE = B_FINALE;
+// Backstop on the leash bypass a SKIP opens. Not a duration the ride is expected
+// to take — the bypass is held until the page actually ARRIVES, because a 940vh
+// smooth scroll outlasts any timeout worth having on a slow device. This only
+// closes a bypass whose ride the visitor interrupted, so it never arrives at all.
+const SKIP_BYPASS_MS = 4000;
+// Where the centred hero copy fades, on that same raw axis. It holds through the
+// whole word beat, goes over the morph, and is gone the frame the first stage
+// caption arrives — which is the point of deriving it rather than picking a
+// slope. The two are different typographic systems on different justifications
+// and they must never be on screen together.
+const COPY_FADE_START = B_WORD;
+const COPY_FADE_END = (MORPH_END - ASSEMBLE_END) / SCROLL_SPAN;
 
 function lerp(a: number, b: number, t: number) {
   return a + (b - a) * t;
@@ -561,6 +611,18 @@ function easeInCubic(t: number) {
 }
 function smoothstep(t: number) {
   return t * t * (3 - 2 * t);
+}
+
+// A subject's half-height ON SCREEN under a pitch: its own height foreshortened by
+// the tilt, plus the share of its plan extent the tilt swings into vertical. Both
+// beats that fit to the clear band need it and both used to write it out — the
+// walk at MODEL_PITCH against its plan half-extent, the finale at FINALE_PITCH
+// against its layer radius. It is the one measurement that has to be right or the
+// fit is wrong: at MODEL_PITCH the assembled table is 1.98 units of true half
+// height and 3.15 of projected, so taking max(plan, y) instead under-measures it
+// by 21% and runs the near legs off the bottom of the frame.
+function screenHalfH(yHalf: number, planHalf: number, cosP: number, sinP: number) {
+  return yHalf * cosP + planHalf * sinP;
 }
 
 // Frame-rate-independent exponential approach. `lerp(x, target, 0.08)` per
@@ -590,10 +652,10 @@ function damp(x: number, target: number, rate: number, dt: number) {
 const SCROLL_OMEGA = 11; // rad/s
 
 // ------------------------------------------------------------------- pacing
-// The walk is nine captures over 468vh, so one capture's beat is ~52vh — half a
-// viewport, and the half of THAT which holds the removal is ~26vh. A trackpad
-// fling covers two or three beats before the finger has left the glass, and
-// because the scene was a pure function of scroll position, "three beats in
+// The walk is eight layers over 468vh, so one layer's beat is ~59vh — well over
+// half a viewport, and the half of THAT which holds the removal is ~29vh. A
+// trackpad fling covers two or three beats before the finger has left the glass,
+// and because the scene was a pure function of scroll position, "three beats in
 // 200ms" meant three teardowns played in 200ms: a flicker, not an animation.
 //
 // The fix is two mechanisms, and they only work as a pair:
@@ -604,32 +666,40 @@ const SCROLL_OMEGA = 11; // rad/s
 //                the scene actually is. Bounds how far behind the scene can
 //                FALL — which is what stops the speed limit from turning into
 //                a ten-second lag, and what makes one fling advance exactly
-//                one capture rather than queueing five.
+//                one layer rather than queueing five.
 //
 // Neither alone is enough. The limit without the leash means the page runs away
 // from the scene and the two disagree for the rest of the hero; the leash
 // without the limit just replays the same too-fast handoff one beat at a time.
 //
-// Must match layers-index.bin (and assets/captures/layers.json). Both mechanisms
-// are expressed in beats, and the walk block in useFrame divides the same span
-// by the count it actually loaded, so a mismatch only detunes the pacing —
-// it cannot desync the two.
-const WALK_CAPTURES = 9;
-// The walk, on the axis the spring works in: `smooth`, which is progress with
-// the intro's fixed share divided back out (see the `p` line in useFrame).
-const WALK_S0 = (SEQ_START - ASSEMBLE_END) / SCROLL_SPAN;
-const WALK_S1 = (SEQ_END - ASSEMBLE_END) / SCROLL_SPAN;
-const WALK_BEAT = (WALK_S1 - WALK_S0) / WALK_CAPTURES;
+// Must match nLayer in cad-layers-index.bin, which is the authority: the walk
+// block in useFrame divides the same span by cad.length, so this number decides
+// only where the DETENTS are. That is not a detuning, it is a correctness
+// requirement — it was 9 against 8 real layers, so the first three detents a
+// visitor hit landed at 87%, 58% and 26% through a removal and parked the page
+// on a half-dissolved cabinet hanging in the air, which is exactly the state
+// 138826a exists to make unreachable. Every consumer below quantises to 1/this:
+// paceLimit's phase, the leash's ceiling and floor, snapBeat's clamp, and the
+// rest the scroll handler re-reads on every gesture. The walk useMemo warns in
+// development if the file disagrees.
+const WALK_LAYERS = 8;
+// WALK_START and WALK_END again, on the axis the spring works in: `smooth`, which
+// is progress with the intro's fixed share divided back out (see the `p` line in
+// useFrame). The scene reads the pair above; everything that has to bound or snap
+// SCROLL reads this pair, because that is the quantity the spring is chasing.
+const WALK_S0 = (WALK_START - ASSEMBLE_END) / SCROLL_SPAN;
+const WALK_S1 = (WALK_END - ASSEMBLE_END) / SCROLL_SPAN;
+const WALK_BEAT = (WALK_S1 - WALK_S0) / WALK_LAYERS;
 // Seconds the scene needs to cross each half of a beat at full tilt. Split,
-// because the two halves are not the same thing to look at: the handoff is
-// where the evaporation and the lift live and it gets the time, while the hold
-// is a static capture with the tail of the previous dolly still running over it
-// and may be crossed faster — but not instantly, or that dolly snaps. Together
-// this is ~1.65s per capture.
+// because the two halves are not the same thing to look at: the handoff is where
+// the dissolve and the lift live and it gets the time, while the hold is a seated
+// machine with the tail of the previous dolly still running over it and may be
+// crossed faster — but not instantly, or that dolly snaps. Together this is ~1.65s
+// per layer, so ~13.2s for the whole walk.
 const PACE_HANDOFF_S = 1.2;
 const PACE_HOLD_S = 0.45;
-const PACE_V_HANDOFF = (WALK_BEAT * SEQ_TRANSITION) / PACE_HANDOFF_S;
-const PACE_V_HOLD = (WALK_BEAT * (1 - SEQ_TRANSITION)) / PACE_HOLD_S;
+const PACE_V_HANDOFF = (WALK_BEAT * WALK_TRANSITION) / PACE_HANDOFF_S;
+const PACE_V_HOLD = (WALK_BEAT * (1 - WALK_TRANSITION)) / PACE_HOLD_S;
 // Outside the walk: a sanity bound the spring never reaches (its own peak speed
 // across a full-page error is ~1.4/s). The word, the morph and the finale are
 // each one continuous beat where scrubbing fast is still legible, so they are
@@ -639,10 +709,10 @@ const PACE_FREE = 4;
 // between them instead of stepping.
 const PACE_RAMP = 0.08;
 // How far scroll may lead (or trail) the scene inside the walk, in beats. One:
-// a fling commits to the capture in front of you and no further.
+// a fling commits to the layer in front of you and no further.
 const LEASH_BEATS = 1;
 // Fraction of a beat you have to move before releasing commits to the next
-// capture instead of returning to the one you were on. Small on purpose — one
+// layer instead of returning to the one you were on. Small on purpose — one
 // wheel notch is about 0.2 of a beat, and "one scroll, one layer" is the whole
 // point. Below it the walk treats the move as a nudge and puts you back.
 const SNAP_TRIGGER = 0.15;
@@ -658,8 +728,8 @@ const SNAP_DELAY_MS = 220;
 // any rounding, far smaller than SNAP_TRIGGER.
 const BEAT_EPS = 0.02;
 
-// The walk's position in beats, and back. Whole numbers are the capture holds:
-// the only places inside the walk where the scene is a readable still.
+// The walk's position in beats, and back. Whole numbers are the layer holds: the
+// only places inside the walk where the scene is a readable still.
 function beatOf(s: number) {
   return (s - WALK_S0) / WALK_BEAT;
 }
@@ -670,13 +740,13 @@ function scrollOfBeat(b: number) {
 // Speed limit at a point on the scroll axis, in progress per second.
 function paceLimit(s: number) {
   if (s <= WALK_S0 || s >= WALK_S1) return PACE_FREE;
-  // Phase inside the current capture's beat, sliced exactly the way the walk
-  // block slices `raw`: the hold is the first (1 - SEQ_TRANSITION), the handoff
+  // Phase inside the current layer's beat, sliced exactly the way the walk
+  // block slices `raw`: the hold is the first (1 - WALK_TRANSITION), the handoff
   // is the rest and runs to the end of the beat.
   const u = (s - WALK_S0) / WALK_BEAT;
   const phase = u % 1;
   const rise = smoothstep(
-    clamp01((phase - (1 - SEQ_TRANSITION) + PACE_RAMP) / (2 * PACE_RAMP))
+    clamp01((phase - (1 - WALK_TRANSITION) + PACE_RAMP) / (2 * PACE_RAMP))
   );
   // The handoff has no room to ramp down before the beat ends — its tail (the
   // leftover skeleton lifting out) is the last thing in it. So the release
@@ -690,13 +760,13 @@ function paceLimit(s: number) {
 // The leash, as a window on the scroll axis around where the scene has got to.
 // Outside the walk it opens to the full page. A scene that has not reached the
 // walk yet is gated at the walk's own start, so a fling from the top of the
-// page stops at the first capture instead of landing in the middle of the
-// teardown with eight beats queued behind it.
+// page stops at the first hold instead of landing in the middle of the teardown
+// with eight beats queued behind it.
 //
 // Both edges land on HOLDS, not on "one beat from wherever the scene happens to
 // be". An unquantised window preserved whatever phase you came to rest at: stop
 // once with the cabinet half evaporated and every flick after it left you half
-// evaporated again, one capture further along, because the window carried the
+// dissolved again, one layer further along, because the window carried the
 // offset forward. Quantised, the window is the pair of readable stills either
 // side of the scene, and the walk cannot drift off them.
 function leashCeil(scene: number) {
@@ -713,15 +783,15 @@ function leashFloor(scene: number) {
 // Where a release should land, given where scroll got to and which hold it left.
 // `from` is the hold the gesture started on; a move of SNAP_TRIGGER in either
 // direction commits to the neighbouring one, anything less returns. One step per
-// release, so this can never skip a capture however far the gesture went — the
+// release, so this can never skip a layer however far the gesture went — the
 // leash has already bounded that anyway.
 function snapBeat(s: number, from: number | null) {
   const b = beatOf(s);
-  const hold = (n: number) => Math.min(WALK_CAPTURES, Math.max(0, n));
+  const hold = (n: number) => Math.min(WALK_LAYERS, Math.max(0, n));
   // No origin worth stepping from — the walk was entered from the table beat
   // above it, or a jump the leash let through re-seated the scene. Land on the
-  // nearest hold instead, so arriving at capture 00 does not immediately step
-  // off it.
+  // nearest hold instead, so arriving at the assembled table does not immediately
+  // step off it.
   if (from === null || Math.abs(b - from) > 1 + SNAP_TRIGGER) return hold(Math.round(b));
   const d = b - from;
   return hold(from + (d > SNAP_TRIGGER ? 1 : d < -SNAP_TRIGGER ? -1 : 0));
@@ -917,7 +987,7 @@ function sampleLockup(text: string) {
     ctx.fillRect(cw / 2 - halfW, cy - ruleTh / 2, halfW - side / 2 - gap, ruleTh);
     ctx.fillRect(cw / 2 + side / 2 + gap, cy - ruleTh / 2, halfW - side / 2 - gap, ruleTh);
 
-    ctx.fillStyle = '#c6ff00';
+    ctx.fillStyle = ACCENT_HEX;
     if (typeof ctx.roundRect === 'function') {
       ctx.beginPath();
       ctx.roundRect(cw / 2 - side / 2, cy - side / 2, side, side, side * 0.26);
@@ -980,197 +1050,20 @@ function sampleLockup(text: string) {
   return { coords, cw, ch };
 }
 
-// A model source, however it was loaded: real gaussians from a splat capture, or
-// isotropic stand-ins synthesised from a bare point cloud.
+// The word's dust, sampled off the machine's surface. Isotropic on purpose: both
+// ends of the morph are round — a text dot and a surface sample at the cloud's own
+// mean spacing — so one radius describes each particle and there is no orientation
+// to carry. A 3DGS capture needed a full ellipsoid here; nothing downloads one any
+// more, and the shader's covariance is a scalar because of it.
 type ModelSource = {
   count: number;
   pos: Float32Array; // xyz
-  scale: Float32Array; // xyz, world units
-  quat: Float32Array; // xyzw
-  color: Float32Array; // rgb 0..1
+  radius: Float32Array; // world units
+  // rgb 0..1, DISPLAY-referred: shaded and sRGB-encoded at sample time, because
+  // the splat shader writes what it is given straight to the drawing buffer.
+  color: Float32Array;
   opacity: Float32Array;
-  photoreal: boolean; // false => synthesised, use the steel gradient
-  // One entry per capture in the sequence, in scroll order. Null for a single
-  // capture, which has nothing to step through and keeps the radial blast.
-  layers: LayerRange[] | null;
 };
-
-type LayerRange = {
-  offset: number; // first splat index
-  count: number;
-  centreY: number; // world units, for framing the capture when it is active
-  radius: number;
-  zoom: number; // group scale that fits this capture to the frame
-  // Vertical span, so the removal can stagger top-first in this capture's own
-  // units — the control column peels like the whole table rather than twitching.
-  minY: number;
-  maxY: number;
-  // How far this part travels to leave the frame, world units along the axis.
-  // Derived from the capture's own framing, not its size: see SEQ_EXIT_FRAMES.
-  exit: number;
-  // The closing diagram. `seatY` is where this part parks on the explode axis
-  // and `lag` is its share of the landing stagger, both derived from the CAD
-  // offsets carried in the sidecar. stackIndex < 0 means "not a part of the
-  // stack" — only the assembled table (00), which the diagram leaves out.
-  stackIndex: number;
-  explodeY: number;
-  seatY: number;
-  lag: number;
-};
-
-// Decode the 32-byte .splat layout written by the PLY path.
-function parseSplats(ab: ArrayBuffer, limit: number): ModelSource {
-  const total = Math.floor(ab.byteLength / 32);
-  const count = Math.min(total, limit);
-  const f32 = new Float32Array(ab);
-  const u8 = new Uint8Array(ab);
-  const pos = new Float32Array(count * 3);
-  const scale = new Float32Array(count * 3);
-  const quat = new Float32Array(count * 4);
-  const color = new Float32Array(count * 3);
-  const opacity = new Float32Array(count);
-
-  for (let i = 0; i < count; i++) {
-    const f = i * 8;
-    const b = i * 32;
-    pos[i * 3] = f32[f];
-    pos[i * 3 + 1] = f32[f + 1];
-    pos[i * 3 + 2] = f32[f + 2];
-    scale[i * 3] = f32[f + 3];
-    scale[i * 3 + 1] = f32[f + 4];
-    scale[i * 3 + 2] = f32[f + 5];
-    color[i * 3] = u8[b + 24] / 255;
-    color[i * 3 + 1] = u8[b + 25] / 255;
-    color[i * 3 + 2] = u8[b + 26] / 255;
-    opacity[i] = u8[b + 27] / 255;
-    // stored wxyz, shader wants xyzw
-    quat[i * 4] = (u8[b + 29] - 128) / 128;
-    quat[i * 4 + 1] = (u8[b + 30] - 128) / 128;
-    quat[i * 4 + 2] = (u8[b + 31] - 128) / 128;
-    quat[i * 4 + 3] = (u8[b + 28] - 128) / 128;
-  }
-  return { count, pos, scale, quat, color, opacity, photoreal: true, layers: null };
-}
-
-// The nine-capture sequence + its index. Two sidecar formats are accepted:
-//   long   [u32 layerCount][per layer: u32 offset, u32 count, f32 dy, f32 stack]
-//   short  [u32 layerCount][per layer: u32 offset, u32 count]
-// The long form carries the CAD explode geometry the finale is built on; the
-// short form is what build-layers.mjs wrote before that beat existed, and falls
-// back to even spacing by walk order. Captures are concatenated at full quality,
-// so nothing is thinned on desktop. `perLayer` caps each capture for small
-// screens; a prefix of a capture is an even subset of it, because the capture's
-// own order is not spatial.
-function parseLayerCloud(
-  ab: ArrayBuffer,
-  indexAb: ArrayBuffer,
-  perLayer: number
-): ModelSource | null {
-  const total = Math.floor(ab.byteLength / 32);
-  const iv = new DataView(indexAb);
-  const n = indexAb.byteLength >= 4 ? iv.getUint32(0, true) : 0;
-  if (!n || indexAb.byteLength < 4 + n * 8) return null;
-  const long = indexAb.byteLength >= 4 + n * 16;
-  const stride = long ? 16 : 8;
-
-  const src = new Float32Array(ab);
-  const su8 = new Uint8Array(ab);
-  const ranges: LayerRange[] = [];
-  let kept = 0;
-  for (let i = 0; i < n; i++) {
-    const o = 4 + i * stride;
-    const off = iv.getUint32(o, true);
-    const cnt = iv.getUint32(o + 4, true);
-    if (off + cnt > total) return null;
-    ranges.push({
-      offset: off,
-      count: Math.min(cnt, perLayer),
-      centreY: 0,
-      radius: 1,
-      zoom: 1,
-      minY: 0,
-      maxY: 1,
-      exit: 1,
-      // Short sidecar: the walk order IS the stack order reversed (00 is the
-      // whole table, then outermost part first), so the diagram can still be
-      // laid out — just evenly, without the CAD's proportions.
-      explodeY: long ? iv.getFloat32(o + 8, true) : 0,
-      stackIndex: long ? iv.getFloat32(o + 12, true) : i === 0 ? -1 : n - 1 - i,
-      seatY: 0,
-      lag: 0,
-    });
-    kept += ranges[i].count;
-  }
-
-  const pos = new Float32Array(kept * 3);
-  const scale = new Float32Array(kept * 3);
-  const quat = new Float32Array(kept * 4);
-  const color = new Float32Array(kept * 3);
-  const opacity = new Float32Array(kept);
-
-  let w = 0;
-  for (const r of ranges) {
-    const start = w;
-    let loY = Infinity;
-    let hiY = -Infinity;
-    let loX = Infinity;
-    let hiX = -Infinity;
-    for (let j = 0; j < r.count; j++, w++) {
-      const f = (r.offset + j) * 8;
-      const b = (r.offset + j) * 32;
-      const y = src[f + 1];
-      pos[w * 3] = src[f];
-      pos[w * 3 + 1] = y;
-      pos[w * 3 + 2] = src[f + 2];
-      scale[w * 3] = src[f + 3];
-      scale[w * 3 + 1] = src[f + 4];
-      scale[w * 3 + 2] = src[f + 5];
-      color[w * 3] = su8[b + 24] / 255;
-      color[w * 3 + 1] = su8[b + 25] / 255;
-      color[w * 3 + 2] = su8[b + 26] / 255;
-      opacity[w] = su8[b + 27] / 255;
-      quat[w * 4] = (su8[b + 29] - 128) / 128;
-      quat[w * 4 + 1] = (su8[b + 30] - 128) / 128;
-      quat[w * 4 + 2] = (su8[b + 31] - 128) / 128;
-      quat[w * 4 + 3] = (su8[b + 28] - 128) / 128;
-      if (y < loY) loY = y;
-      if (y > hiY) hiY = y;
-      const x = src[f];
-      if (x < loX) loX = x;
-      if (x > hiX) hiX = x;
-    }
-    // Where this capture sits and how big it is, so the beat can frame it.
-    r.offset = start;
-    r.centreY = (loY + hiY) / 2;
-    r.radius = Math.max(0.001, (hiX - loX) / 2, (hiY - loY) / 2);
-    r.zoom = Math.min(SEQ_ZOOM_MAX, Math.max(SEQ_ZOOM_MIN, SEQ_FRAME_RADIUS / r.radius));
-    r.minY = loY;
-    r.maxY = hiY;
-    // How far this part must travel to leave. Object-space, so it undoes the
-    // framing zoom — a small capture is magnified, so it needs LESS world travel
-    // to cross the same screen. Sized against the camera at rest (z = 10, fov
-    // 50), the widest the frame ever gets during the walk, so the part always
-    // clears it. No pitch term: travel is along the screen's vertical, not the
-    // model's own, so it is never foreshortened. See uAxis.
-    r.exit = (SEQ_EXIT_FRAMES * CAM_HALF_H) / r.zoom + r.radius;
-  }
-
-  // Seats for the closing diagram, from the CAD offsets the sidecar carries.
-  const maxDy = Math.max(0, ...ranges.map((r) => r.explodeY));
-  const maxStack = Math.max(0, ...ranges.map((r) => r.stackIndex));
-  for (const r of ranges) {
-    if (r.stackIndex < 0) continue; // the assembled table is not in the diagram
-    const cad = maxDy > 0 ? r.explodeY / maxDy : 0;
-    const even = maxStack > 0 ? r.stackIndex / maxStack : 0;
-    const t = lerp(cad, even, FINALE_EVENNESS);
-    r.seatY = t * FINALE_SPAN;
-    // Landing order: the parts settle bottom-up, so the diagram builds the way
-    // a hand would lay them out and the last thing to arrive is the outer shell.
-    r.lag = t;
-  }
-
-  return { count: kept, pos, scale, quat, color, opacity, photoreal: true, layers: ranges };
-}
 
 // ---------------------------------------------------------------- CAD diagram
 type CadLayer = {
@@ -1183,8 +1076,12 @@ type CadLayer = {
   meshes: THREE.InstancedMesh[];
   geometries: THREE.BufferGeometry[];
   // One material for the whole layer: uFade and uCamPos are per layer, so there is
-  // nothing to vary between its shapes.
+  // nothing to vary between its shapes. Two VARIANTS of it, differing only in
+  // whether the dissolve is compiled in, sharing one uniforms object — so
+  // `material.uniforms` is still the single place the frame loop writes, whichever
+  // is bound. See cadMaterials.
   material: THREE.RawShaderMaterial;
+  peelMaterial: THREE.RawShaderMaterial;
   // Built here rather than declared in JSX so the frame loop can move each layer by
   // touching the object directly, with no ref array to keep in step.
   root: THREE.Group;
@@ -1209,6 +1106,178 @@ type CadLayer = {
   alpha: number; // 0..1 isolation opacity, independent of the landing fade
 };
 
+// --------------------------------------------------- the shared shading numbers
+// The light rig, the sky and the view transform, kept as NUMBERS rather than as
+// GLSL text, because two different machines now evaluate them: the fragment
+// shader below, and the CPU pass that shades the word's particles (see
+// sampleCadSurface). Those two are REQUIRED to agree — the premise of the morph is
+// that the dust and the mesh are the same picture of the same object, so a
+// divergence between them is not a small colour error, it is the beat failing —
+// and the only way to guarantee it is for the shader's own declarations to be
+// built out of the same constants the JS reads. They are, a few lines down.
+//
+// The rig was read out of the blend and converted into render-world directions.
+// Blender is z-up and the render world applies (x, y, z) -> (x, z, -y), so these
+// are the normalised directions from the machine's centre toward each light after
+// that swap. Intensities are relative irradiance, P / d^2, with the key at 1.
+//
+//   L_Key   area 1.5 m   210 W  at (-1.439, -1.689, 1.453)   front left, high
+//   L_Fill  area 2.6 m    38 W  at ( 1.814, -1.126, 0.515)   front right, low
+//   L_Rim   area 1.4 m    95 W  at ( 0.188,  1.876, 1.015)   behind, high
+//
+// The lights are DIRECTIONAL, not positional. Cycles rendered each layer at its
+// true seat; the diagram pulls the layers 1.8 m apart along the explode axis, and
+// point lights over that span would light the cabinet at the top visibly
+// differently from the electronics box at the bottom. A diagram wants one
+// consistent read.
+//
+// The blend's fourth rig (LIB_*, off in the material-library corner of the same
+// scene) contributes about a fifth of the key from the far side; it is folded in
+// as the last entry rather than dropped, because the reference renders do include
+// it.
+const LDIR: readonly (readonly [number, number, number])[] = [
+  [-0.5617, 0.4995, 0.6592], // key
+  [0.8387, 0.1595, 0.5205], // fill
+  [0.091, 0.409, -0.908], // rim
+  [0.4724, 0.6169, 0.6295], // the library rig, folded into one term
+];
+const LPOW: readonly number[] = [1.0, 0.253, 0.697, 0.197];
+// Each light's angular half-size at the machine, which is what turns a point
+// highlight into the broad soft gradient the reference shows on the aluminium
+// legs. Specular only, so the particle pass never reads it.
+const LRAD: readonly number[] = [0.146, 0.301, 0.169, 0.212];
+
+// The blend's world is a Nishita sky at 0.13 strength with the sun 28 degrees up
+// — a cool zenith over a warmer horizon, with nothing below because the studio
+// floor is hidden for these renders. A three-stop gradient reproduces the part of
+// that which a 60 px part can actually show.
+const SKY_ZENITH: readonly [number, number, number] = [0.38, 0.47, 0.68];
+const SKY_HORIZON: readonly [number, number, number] = [0.52, 0.52, 0.52];
+const SKY_GROUND: readonly [number, number, number] = [0.07, 0.07, 0.08];
+// Diffuse irradiance from that gradient is a cosine-weighted integral over the
+// whole hemisphere, and this is the cheap stand-in for it: the gradient sampled in
+// the normal's own direction, mixed with a flat zenith term. This is the mix, and
+// it has to be one number because two machines evaluate it — CAD_FRAG for the mesh
+// and sampleCadSurface for the particles — and they are required to agree.
+const SKY_ZENITH_SHARE = 0.4;
+
+// AgX, as Blender applies it. This is the single biggest reason the first pass
+// looked wrong: the blend renders through AgX with the Medium High Contrast look,
+// and encoding linear radiance with pow(1/2.2) instead is nothing like it. AgX
+// rolls saturated channels toward white as they brighten, which is exactly what
+// keeps the SolidWorks primaries from reading as neon. The previous shader faked
+// that by desaturating everything by a flat 28%, which cost the metals their
+// colour too — and is now handled properly, at the palette, before either of
+// these ever sees a colour.
+//
+// Matrices are flattened in GLSL's own mat3 order, i.e. by COLUMN, so the JS
+// evaluation and the emitted constructor read the same list the same way.
+const AGX_IN: readonly number[] = [
+  0.856627153315983, 0.137318972929847, 0.11189821299995,
+  0.0951212405381588, 0.761241990602591, 0.0767994186031903,
+  0.0482516061458583, 0.101439036467562, 0.811302368396859,
+];
+const AGX_OUT: readonly number[] = [
+  1.1271005818144368, -0.1413297634984383, -0.14132976349843826,
+  -0.11060664309660323, 1.157823702216272, -0.11060664309660294,
+  -0.016493938717834573, -0.016493938717834257, 1.2519364065950405,
+];
+const SRGB_TO_2020: readonly number[] = [
+  0.6274, 0.0691, 0.0164,
+  0.3293, 0.9195, 0.088,
+  0.0433, 0.0113, 0.8956,
+];
+const REC2020_TO_SRGB: readonly number[] = [
+  1.6605, -0.1246, -0.0182,
+  -0.5876, 1.1329, -0.1006,
+  -0.0728, -0.0083, 1.1187,
+];
+const AGX_MIN_EV = -12.47393;
+const AGX_MAX_EV = 4.026069;
+// The sigmoid AgX puts on the log-encoded value, descending from x^6 to x^0.
+const AGX_CONTRAST: readonly number[] = [
+  15.5, -40.14, 31.96, -6.868, 0.4298, 0.1191, -0.00232,
+];
+// The "Medium High Contrast" look, as a power and a touch of saturation on top of
+// AgX base. Blender ships it as a curve; this is the two-parameter fit of it,
+// matched against 04_renders/pbr_mechanism.png.
+const AGX_LOOK_POW = 1.2;
+const AGX_LOOK_SAT = 1.18;
+const LUMA: readonly [number, number, number] = [0.2126, 0.7152, 0.0722];
+
+// A JS number as a GLSL float literal. An integer-valued float still has to carry
+// its point, and JS's exponent form (1e-7) is not valid GLSL at all. Used by both
+// shaders — there was a second, weaker one of these (toFixed(5)) baking the splat
+// shader's progress constants, which quietly held the vertex shader's morph curve
+// to five decimals while the depth sort mirroring it ran at full precision.
+function glf(n: number) {
+  const s = Number.isInteger(n) ? n.toFixed(1) : String(n);
+  return s.includes('e') || s.includes('E') ? n.toFixed(12) : s;
+}
+const glVec3 = (v: readonly number[]) => `vec3(${v.map(glf).join(', ')})`;
+const glMat3 = (m: readonly number[]) =>
+  `mat3(\n  ${[0, 3, 6].map((i) => m.slice(i, i + 3).map(glf).join(', ')).join(',\n  ')})`;
+
+// The same transform on the CPU, for the particles. The matrices are column-major
+// to match the GLSL constructors above — M * v is v.x * col0 + v.y * col1 +
+// v.z * col2, i.e. m[0], m[3], m[6] is the first ROW — so each multiply below
+// reads its coefficients with a stride of 3 and the two evaluations are the same
+// expression rather than a transcription of one another.
+//
+// Scalar in, scalar out through a caller-owned triple, and the arithmetic is
+// written out rather than expressed as vector ops. It reads worse and it is the
+// right trade exactly once, here: this runs 150,000 times inside one idle
+// callback, and the array-and-.map() form allocated seven short-lived triples a
+// call — over a million of them — for 41.4 ms against 14.9 ms, measured on the
+// real geometry. The two forms agree to 8e-15, i.e. 2e-12 of one 255 code, so
+// this is the same numbers in the same order and not a second implementation.
+//
+// `out` may be the same array the inputs were read from; every input is consumed
+// into locals first.
+function agxJs(r: number, g: number, b: number, out: [number, number, number]) {
+  let x = r * SRGB_TO_2020[0] + g * SRGB_TO_2020[3] + b * SRGB_TO_2020[6];
+  let y = r * SRGB_TO_2020[1] + g * SRGB_TO_2020[4] + b * SRGB_TO_2020[7];
+  let z = r * SRGB_TO_2020[2] + g * SRGB_TO_2020[5] + b * SRGB_TO_2020[8];
+  let c0 = x * AGX_IN[0] + y * AGX_IN[3] + z * AGX_IN[6];
+  let c1 = x * AGX_IN[1] + y * AGX_IN[4] + z * AGX_IN[7];
+  let c2 = x * AGX_IN[2] + y * AGX_IN[5] + z * AGX_IN[8];
+
+  const evScale = 1 / (AGX_MAX_EV - AGX_MIN_EV);
+  c0 = clamp01((Math.log2(Math.max(c0, 1e-10)) - AGX_MIN_EV) * evScale);
+  c1 = clamp01((Math.log2(Math.max(c1, 1e-10)) - AGX_MIN_EV) * evScale);
+  c2 = clamp01((Math.log2(Math.max(c2, 1e-10)) - AGX_MIN_EV) * evScale);
+
+  // Horner over the same descending coefficient list the shader emits.
+  let a0 = 0;
+  let a1 = 0;
+  let a2 = 0;
+  for (const k of AGX_CONTRAST) {
+    a0 = a0 * c0 + k;
+    a1 = a1 * c1 + k;
+    a2 = a2 * c2 + k;
+  }
+  const luma = a0 * LUMA[0] + a1 * LUMA[1] + a2 * LUMA[2];
+  a0 = clamp01(luma + AGX_LOOK_SAT * (Math.pow(Math.max(a0, 0), AGX_LOOK_POW) - luma));
+  a1 = clamp01(luma + AGX_LOOK_SAT * (Math.pow(Math.max(a1, 0), AGX_LOOK_POW) - luma));
+  a2 = clamp01(luma + AGX_LOOK_SAT * (Math.pow(Math.max(a2, 0), AGX_LOOK_POW) - luma));
+
+  x = Math.pow(Math.max(a0 * AGX_OUT[0] + a1 * AGX_OUT[3] + a2 * AGX_OUT[6], 0), 2.2);
+  y = Math.pow(Math.max(a0 * AGX_OUT[1] + a1 * AGX_OUT[4] + a2 * AGX_OUT[7], 0), 2.2);
+  z = Math.pow(Math.max(a0 * AGX_OUT[2] + a1 * AGX_OUT[5] + a2 * AGX_OUT[8], 0), 2.2);
+
+  out[0] = Math.max(x * REC2020_TO_SRGB[0] + y * REC2020_TO_SRGB[3] + z * REC2020_TO_SRGB[6], 0);
+  out[1] = Math.max(x * REC2020_TO_SRGB[1] + y * REC2020_TO_SRGB[4] + z * REC2020_TO_SRGB[7], 0);
+  out[2] = Math.max(x * REC2020_TO_SRGB[2] + y * REC2020_TO_SRGB[5] + z * REC2020_TO_SRGB[8], 0);
+}
+
+// AgX hands back LINEAR sRGB — the pow(2.2) at the end of it is undoing an
+// encode, not applying one. Neither of this scene's materials gets three's
+// output-colour-space chunk (both are RawShaderMaterial), so the OETF is applied
+// explicitly on both paths.
+function encodeSrgbJs(v: number) {
+  return v < 0.0031308 ? v * 12.92 : Math.pow(Math.max(v, 0), 1 / 2.4) * 1.055 - 0.055;
+}
+
 // Physically based CAD on a near-black page, shaded to match the project's own
 // Cycles renders (04_renders/pbr_mechanism.png, photo/exploded_overview.png)
 // rather than approximating them. Everything the Principled BSDF needs comes out
@@ -1231,7 +1300,7 @@ uniform mat4 uViewProj;
 in vec3 position;
 in vec3 normal;
 in vec3 color;
-in vec3 mra; // metallic, roughness, occlusion
+in vec4 mra; // metallic, roughness, occlusion, detail (see the detail channel)
 // Per-instance placement, local part space -> render world. Vertices are stored in
 // the part's OWN space so one copy serves every instance; three fills this from the
 // InstancedMesh. Every transform in the assembly was verified to be a similarity
@@ -1239,13 +1308,20 @@ in vec3 mra; // metallic, roughness, occlusion
 // normals through mat3 of it legitimate.
 in mat4 instanceMatrix;
 out vec3 vWorld;
+// The same point WITHOUT modelMatrix, i.e. in the assembly's own frame. The
+// dissolve hashes its grain off this and not off vWorld: modelMatrix carries the
+// drifting yaw, the pitch, the fit dolly and the layer's own lift, all of which
+// move every frame, so a world-space hash re-rolls which fragments survive on
+// every frame of the removal. See the grain in CAD_FRAG.
+out vec3 vPart;
 out vec3 vNrm;
 out vec3 vColor;
-out vec3 vMra;
+out vec4 vMra;
 void main() {
   mat4 m = modelMatrix * instanceMatrix;
   vec4 world = m * vec4(position, 1.0);
   vWorld = world.xyz;
+  vPart = (instanceMatrix * vec4(position, 1.0)).xyz;
   // The group only ever rotates and scales uniformly, so the rotation part carries
   // normals correctly once renormalised — no separate normal matrix, and lighting
   // stays in world space where the studio rig is defined.
@@ -1256,34 +1332,15 @@ void main() {
 }
 `;
 
-// The lighting rig, read out of the blend and converted into render-world
-// directions. Blender is z-up and the render world applies (x, y, z) -> (x, z,
-// -y), so these are the normalised directions from the machine's centre toward
-// each light after that swap. Intensities are relative irradiance, P / d^2, with
-// the key normalised to 1.
-//
-//   L_Key   area 1.5 m   210 W  at (-1.439, -1.689, 1.453)   front left, high
-//   L_Fill  area 2.6 m    38 W  at ( 1.814, -1.126, 0.515)   front right, low
-//   L_Rim   area 1.4 m    95 W  at ( 0.188,  1.876, 1.015)   behind, high
-//
-// The lights are DIRECTIONAL here, not positional. Cycles rendered each layer at
-// its true seat; the diagram pulls the layers 1.8 m apart along the explode axis,
-// and point lights over that span would light the cabinet at the top visibly
-// differently from the electronics box at the bottom. A diagram wants one
-// consistent read.
-//
-// `radius` is the light's angular half-size at the machine, which is what turns a
-// point highlight into the broad soft gradient the reference shows on the
-// aluminium legs. The blend's fourth rig (LIB_*, off in the material-library
-// corner of the same scene) contributes about a fifth of the key from the far
-// side; it is folded in as the last entry rather than dropped, because the
-// reference renders do include it.
+// Every number in here that is not a BRDF comes from the shared block above; see
+// the note there for why the shader is built out of it rather than repeating it.
 const CAD_FRAG = /* glsl */ `
 precision highp float;
 in vec3 vWorld;
+in vec3 vPart;
 in vec3 vNrm;
 in vec3 vColor;
-in vec3 vMra;
+in vec4 vMra;
 // Deliberately not three's built-in cameraPosition uniform. That one is uploaded
 // only when the shader program changes or the camera object does — not once a
 // frame — and this scene's camera moves every frame (pointer parallax plus a
@@ -1295,6 +1352,10 @@ uniform float uFade;
 uniform float uExposure;
 uniform float uAmbient;
 uniform float uAo;
+// How much of the baked occlusion the DIRECT terms pay, as opposed to the
+// ambient, which always pays in full. A uniform rather than a constant because
+// the walk and the finale want very different answers — see the WALK_* block.
+uniform float uAoDirect;
 // Inspection state for this layer. uHot is the hover lift, uDim is how far the
 // layer has been pushed behind whichever one the pointer is on. Both are
 // UNIFORMS PER LAYER, which is the whole reason this beat could be made
@@ -1303,19 +1364,26 @@ uniform float uAo;
 // a frame and not one extra draw call, shader variant or render target.
 uniform float uHot;
 uniform float uDim;
+// The hover's acid rim, split off uHot so the walk can borrow the exposure half
+// without borrowing the interface. Written from the pointer and from nothing
+// else.
+uniform float uAccent;
+// The teardown's dissolve. uPeel sweeps 0 -> 1 across this layer's removal; the
+// band is how much of the detail channel is in flight at once and the grain is
+// the per-fragment jitter that stops the front reading as a contour line.
+uniform float uPeel;
+uniform float uPeelBand;
+uniform float uPeelGrain;
 out vec4 outColor;
 
 const float PI = 3.14159265359;
 
-const int NLIGHT = 4;
-const vec3 LDIR[4] = vec3[4](
-  vec3(-0.5617,  0.4995,  0.6592),  // key
-  vec3( 0.8387,  0.1595,  0.5205),  // fill
-  vec3( 0.0910,  0.4090, -0.9080),  // rim
-  vec3( 0.4724,  0.6169,  0.6295)   // the library rig, folded into one term
+const int NLIGHT = ${LDIR.length};
+const vec3 LDIR[${LDIR.length}] = vec3[${LDIR.length}](
+  ${LDIR.map(glVec3).join(',\n  ')}
 );
-const vec4 LPOW = vec4(1.0, 0.253, 0.697, 0.197);
-const vec4 LRAD = vec4(0.146, 0.301, 0.169, 0.212);
+const vec4 LPOW = vec4(${LPOW.map(glf).join(', ')});
+const vec4 LRAD = vec4(${LRAD.map(glf).join(', ')});
 
 float dGGX(float NoH, float a) {
   float a2 = a * a;
@@ -1342,74 +1410,47 @@ vec3 envBRDF(vec3 f0, float rough, float NoV) {
   return f0 * ab.x + ab.y;
 }
 
-// The blend's world is a Nishita sky at 0.13 strength with the sun 28 degrees up
-// — a cool zenith over a warmer horizon, with nothing below because the studio
-// floor is hidden for these renders. A three-stop gradient reproduces the part
-// of that which a 60 px part can actually show.
 vec3 sky(vec3 d) {
   float up = d.y;
-  vec3 zenith = vec3(0.38, 0.47, 0.68);
-  vec3 horizon = vec3(0.52, 0.52, 0.52);
-  vec3 ground = vec3(0.07, 0.07, 0.08);
+  vec3 zenith = ${glVec3(SKY_ZENITH)};
+  vec3 horizon = ${glVec3(SKY_HORIZON)};
+  vec3 ground = ${glVec3(SKY_GROUND)};
   return up > 0.0
     ? mix(horizon, zenith, sqrt(up))
     : mix(horizon, ground, sqrt(-up));
 }
 
-// AgX, as Blender applies it. This is the single biggest reason the first pass
-// looked wrong: the blend renders through AgX with the Medium High Contrast look,
-// and encoding linear radiance with pow(1/2.2) instead is nothing like it. AgX
-// rolls saturated channels toward white as they brighten, which is exactly what
-// keeps the pure-primary SolidWorks colours — the felt green in particular
-// arrives as fully saturated green — from reading as neon. The previous shader
-// faked that by desaturating everything by a flat 28%, which cost the metals
-// their colour too.
-const mat3 AGX_IN = mat3(
-  0.856627153315983, 0.137318972929847, 0.11189821299995,
-  0.0951212405381588, 0.761241990602591, 0.0767994186031903,
-  0.0482516061458583, 0.101439036467562, 0.811302368396859);
-const mat3 AGX_OUT = mat3(
-  1.1271005818144368, -0.1413297634984383, -0.14132976349843826,
-  -0.11060664309660323, 1.157823702216272, -0.11060664309660294,
-  -0.016493938717834573, -0.016493938717834257, 1.2519364065950405);
-const mat3 SRGB_TO_2020 = mat3(
-  0.6274, 0.0691, 0.0164,
-  0.3293, 0.9195, 0.0880,
-  0.0433, 0.0113, 0.8956);
-const mat3 REC2020_TO_SRGB = mat3(
-   1.6605, -0.1246, -0.0182,
-  -0.5876,  1.1329, -0.1006,
-  -0.0728, -0.0083,  1.1187);
+const mat3 AGX_IN = ${glMat3(AGX_IN)};
+const mat3 AGX_OUT = ${glMat3(AGX_OUT)};
+const mat3 SRGB_TO_2020 = ${glMat3(SRGB_TO_2020)};
+const mat3 REC2020_TO_SRGB = ${glMat3(REC2020_TO_SRGB)};
 
+// Horner, descending from x^6, so the JS evaluation of the same coefficient list
+// is the same expression rather than a transcription of it.
 vec3 agxContrast(vec3 x) {
-  vec3 x2 = x * x;
-  vec3 x4 = x2 * x2;
-  return 15.5 * x4 * x2 - 40.14 * x4 * x + 31.96 * x4
-       - 6.868 * x2 * x + 0.4298 * x2 + 0.1191 * x - 0.00232;
+  vec3 acc = vec3(${glf(AGX_CONTRAST[0])});
+  ${AGX_CONTRAST.slice(1)
+    .map((k) => `acc = acc * x + vec3(${glf(k)});`)
+    .join('\n  ')}
+  return acc;
 }
 
 vec3 agx(vec3 c) {
-  const float MIN_EV = -12.47393;
-  const float MAX_EV = 4.026069;
+  const float MIN_EV = ${glf(AGX_MIN_EV)};
+  const float MAX_EV = ${glf(AGX_MAX_EV)};
   c = SRGB_TO_2020 * c;
   c = AGX_IN * c;
   c = clamp((log2(max(c, 1e-10)) - MIN_EV) / (MAX_EV - MIN_EV), 0.0, 1.0);
   c = agxContrast(c);
-  // The "Medium High Contrast" look, as a power and a touch of saturation on top
-  // of AgX base. Blender ships it as a curve; this is the two-parameter fit of
-  // it, matched against 04_renders/pbr_mechanism.png.
-  float luma = dot(c, vec3(0.2126, 0.7152, 0.0722));
-  c = luma + 1.18 * (pow(max(c, 0.0), vec3(1.20)) - luma);
+  float luma = dot(c, ${glVec3(LUMA)});
+  c = luma + ${glf(AGX_LOOK_SAT)} * (pow(max(c, 0.0), vec3(${glf(AGX_LOOK_POW)})) - luma);
   c = AGX_OUT * clamp(c, 0.0, 1.0);
   c = REC2020_TO_SRGB * pow(max(c, 0.0), vec3(2.2));
   return max(c, 0.0);
 }
 
-// AgX hands back LINEAR sRGB — the pow(2.2) at the end of it is undoing an
-// encode, not applying one. A RawShaderMaterial writes straight to the drawing
-// buffer with none of three's output-colour-space chunk, so the OETF has to be
-// here. Leaving it out is what the first attempt did, and the diagram came back
-// looking correctly shaded but three stops underexposed.
+// The OETF. Leaving it out is what the first attempt did, and the diagram came
+// back looking correctly shaded but three stops underexposed.
 vec3 encodeSrgb(vec3 c) {
   return mix(c * 12.92,
              pow(max(c, vec3(0.0)), vec3(1.0 / 2.4)) * 1.055 - 0.055,
@@ -1417,6 +1458,68 @@ vec3 encodeSrgb(vec3 c) {
 }
 
 void main() {
+  // ------------------------------------------------------------- the dissolve
+  // COMPILED OUT unless this is the peel variant of the program, and that is a
+  // cost decision rather than a tidiness one. A fragment shader containing
+  // discard cannot have its coverage known before it runs, so the hardware gives
+  // up early depth WRITE on a desktop IMR and, on every tile-based GPU — all
+  // iOS, all Apple Silicon, Mali, Adreno — opts the draw out of hidden surface
+  // removal altogether. All eight layers share one program, so a discard that is
+  // reachable on at most one layer at a time was disabling HSR for every layer
+  // on 89% of the page: precisely defeating the reason the seated layers are
+  // handed to the opaque pass at all (see the note beside depthWrite in the
+  // per-layer loop). It is not a cheap shader to run four to eight times over
+  // per pixel — four GGX lobes, two sky lookups, then AgX.
+  //
+  // So there are two programs from this one source, differing in this block, and
+  // a layer is given the peel one only while it is actually dissolving. See
+  // cadMaterial.
+  //
+  // First, and before any shading is done: a discarded fragment should not pay
+  // for a PBR evaluation it is going to throw away, and on the removal frames a
+  // large share of the layer is discarded.
+  //
+  // The layer does not fade — it SKELETONISES. vMra.w is the detail channel: 0 on
+  // the big flat triangles the decimator left across panels and skirts, 1 on the
+  // small ones it kept for edges, fillets, fastener heads and the perforations in
+  // the storage tracks. Sweeping a threshold up that channel evaporates the
+  // SURFACES while the DETAIL persists, so the shell opens into a tracery of its
+  // own edges and the mechanism underneath shows through the holes rather than
+  // being cross-faded on top of.
+  //
+  // The front sweeps the whole range the grained channel actually occupies, and
+  // that range is wider than the channel: the grain pushes a fragment as far as
+  // half its own amplitude either side of the raw value, and the band trails
+  // behind the front. Fitted to that rather than to 0..1, so uPeel 0 clears
+  // exactly nothing and uPeel 1 clears exactly everything. Sweeping only 0..1+band
+  // meant a removal OPENED on a step: at the first frame past zero the front was
+  // already inside the grain's own spread, so a flat fragment that happened to
+  // hash high jumped straight to 0.73 alpha and a dither texture appeared on the
+  // panels out of nothing, at the exact moment the eye goes looking for the
+  // removal to begin.
+  float peeled = 0.0;
+#ifdef PEEL
+  if (uPeel > 0.0) {
+    // Per-fragment grain, hashed off the ASSEMBLY's own frame — the vertex after
+    // its instance transform and nothing more. Not world position: the group is
+    // yawed, pitched, dollied and lifted every frame, and this hash re-randomises
+    // completely for arguments that far apart, so hashing world space made the
+    // surviving fragments re-roll frame to frame. "These specific edges held while
+    // the panel went" IS the effect, and it only exists if the survivors are the
+    // same ones next frame. It is also why the stills of this beat read better
+    // than the animation did.
+    //
+    // Per fragment rather than per vertex, so it stays noise: interpolated, the
+    // hash would become a smooth gradient across each triangle and the panels
+    // would peel along their own tessellation.
+    float g = fract(sin(dot(vPart.xy + vPart.z, vec2(12.9898, 78.233))) * 43758.5453);
+    float d = vMra.w + (g - 0.5) * uPeelGrain;
+    float front = mix(-0.5 * uPeelGrain, 1.0 + 0.5 * uPeelGrain + uPeelBand, uPeel);
+    peeled = 1.0 - smoothstep(front - uPeelBand, front, d);
+    if (peeled >= 0.996) discard;
+  }
+#endif
+
   // Winding is trustworthy: the exporter measures it against the CAD normals and
   // reports 99.8% agreement over 173k triangles, so front-facing really does
   // mean front-facing. Both sides still draw — a fifth of a percent of slivers
@@ -1429,7 +1532,11 @@ void main() {
   float NoV = max(dot(n, v), 1e-4);
 
   float metal = vMra.x;
-  float rough = clamp(vMra.y, 0.045, 1.0);
+  // Floor on roughness, so a perfect mirror still has a lobe with a finite width
+  // for the specular antialiasing below to widen. Numerically equal to the cap on
+  // that widening, and unrelated to it — one is a roughness, the other is in
+  // alpha-squared.
+  float rough = clamp(vMra.y, ${glf(CAD_ROUGH_MIN)}, 1.0);
   float ao = mix(1.0, vMra.z, uAo);
 
   // Geometric specular antialiasing. A chrome bearing at 0.06 roughness has a
@@ -1442,19 +1549,19 @@ void main() {
   vec3 dny = dFdy(n);
   float variance = 0.5 * (dot(dnx, dnx) + dot(dny, dny));
   float a = rough * rough;
-  // The ceiling on how much roughness this may ADD, in alpha-squared. It was
-  // 0.25, which is not a widening but a demolition: it lets alpha reach 0.5,
-  // i.e. roughness 0.71, and this machine is dense enough — perforated tracks,
-  // rings of small rollers, gear teeth — that the variance term saturates over
-  // most of the model at anything short of full display resolution. Every metal
-  // in the diagram was therefore being drawn at plaster roughness, which is
-  // exactly the "no specular anywhere" the closing shot had.
+  // CAD_SPEC_AA_MAX is the ceiling on how much roughness this may ADD, in
+  // alpha-squared. It was 0.25, which is not a widening but a demolition: it lets
+  // alpha reach 0.5, i.e. roughness 0.71, and this machine is dense enough —
+  // perforated tracks, rings of small rollers, gear teeth — that the variance term
+  // saturates over most of the model at anything short of full display resolution.
+  // Every metal in the diagram was therefore being drawn at plaster roughness,
+  // which is exactly the "no specular anywhere" the closing shot had.
   //
-  // 0.045 is the usual working range for this approximation and still covers
-  // what it is for: a chrome bearing at roughness 0.06 has alpha 0.0036, so the
-  // floor this imposes is alpha 0.21 — a highlight a couple of pixels across
+  // The shipped value is the usual working range for this approximation and still
+  // covers what it is for: a chrome bearing at roughness 0.06 has alpha 0.0036, so
+  // the floor it imposes is alpha 0.21 — a highlight a couple of pixels across
   // instead of a sub-pixel one that strobes as the diagram turns.
-  a = min(1.0, sqrt(a * a + min(2.0 * variance, 0.045)));
+  a = min(1.0, sqrt(a * a + min(2.0 * variance, ${glf(CAD_SPEC_AA_MAX)})));
 
   vec3 albedo = vColor * (1.0 - metal);
   vec3 f0 = mix(vec3(0.04), vColor, metal);
@@ -1483,10 +1590,10 @@ void main() {
   }
   // Occlusion cuts the ambient in full and the direct terms only partly. Direct
   // light is not really occluded by a nearby surface in the way ambient is, but
-  // this is a diagram of a machine whose interesting parts are all inside
-  // something, and letting a little of it through is what makes the chassis and
-  // the cabinet read as enclosures.
-  lit *= mix(1.0, ao, 0.35);
+  // this is a machine whose interesting parts are all inside something, and how
+  // much of it gets through is the single biggest lever on whether the frame has
+  // any blacks in it at all.
+  lit *= mix(1.0, ao, uAoDirect);
 
   // Ambient. Irradiance from the sky gradient, plus its specular half through
   // the split-sum approximation — the second is what puts the environment's own
@@ -1494,7 +1601,7 @@ void main() {
   // wherever the three lights do not reach it.
   // sky() at straight up is a constant; only sky(n) varies. Folding the zenith
   // term in as a literal saves a branch and three mixes per fragment.
-  vec3 irr = sky(n) * 0.6 + vec3(0.38, 0.47, 0.68) * 0.4;
+  vec3 irr = sky(n) * ${glf(1 - SKY_ZENITH_SHARE)} + ${glVec3(SKY_ZENITH)} * ${glf(SKY_ZENITH_SHARE)};
   vec3 amb = albedo * irr;
   amb += sky(reflect(-v, n)) * envBRDF(f0, rough, NoV);
   lit += amb * uAmbient * ao;
@@ -1506,67 +1613,111 @@ void main() {
   // its specular before it loses its colour — which is how a real part behaves
   // when you move a light, and is why this reads as focus rather than as a
   // brightness slider.
-  vec3 col = encodeSrgb(agx(lit * uExposure * mix(1.0, 1.22, uHot) * mix(1.0, 0.2, uDim)));
+  vec3 col = encodeSrgb(agx(lit * uExposure
+    * mix(1.0, ${glf(CAD_HOT_GAIN)}, uHot)
+    * mix(1.0, ${glf(CAD_DIM_GAIN)}, uDim)));
 
   // Dimming also desaturates. Exposure alone was not enough separation on the
   // layers that are mostly one saturated colour — the felt green turntable stayed
   // the loudest thing on screen even two stops down, because AgX is protecting
   // exactly that primary on purpose.
-  float grey = dot(col, vec3(0.2126, 0.7152, 0.0722));
-  col = mix(col, vec3(grey), uDim * 0.72);
+  float grey = dot(col, ${glVec3(LUMA)});
+  col = mix(col, vec3(grey), uDim * ${glf(CAD_DIM_DESAT)});
 
   // The hover accent: a fresnel rim in the site's acid, added in DISPLAY space
   // after the tone map. Deliberately not fed through agx() as if it were light —
   // it is not light, it is the interface pointing at something, and pushing it
   // through the transform would drag it toward white and land it as a wash
-  // instead of an edge.
+  // instead of an edge. See ACCENT_SRGB for why it is spelled in this space.
   float rim = 1.0 - NoV;
   rim *= rim * rim;
-  col += vec3(0.776, 1.0, 0.0) * rim * uHot * 0.85;
+  col += ${glVec3(ACCENT_SRGB)} * rim * uAccent * ${glf(CAD_RIM_GAIN)};
 
-  outColor = vec4(col * uFade, uFade);
+  // Premultiplied, and the dissolve multiplies the landing fade rather than
+  // replacing it: a layer can be mid-removal and mid-isolation at once while the
+  // walk is being scrubbed backwards, and the two opacities are independent.
+  // Deliberately not named a: that is already the roughness alpha further up this
+  // same scope, and GLSL redefinition is a hard compile error — which takes the
+  // whole material down and draws NOTHING, silently, on every beat that uses it.
+  // (No backticks in this file's shader comments, either. They are template
+  // literals, so a backtick ends the string and the syntax error lands on a line
+  // of GLSL that is perfectly fine.)
+  float outA = uFade * (1.0 - peeled);
+  outColor = vec4(col * outA, outA);
 }
 `;
 
-function cadMaterial() {
-  return new THREE.RawShaderMaterial({
-    glslVersion: THREE.GLSL3,
-    uniforms: {
-      uFade: { value: 0 },
-      uCamPos: { value: new THREE.Vector3(0, 0, 10) },
-      uViewProj: { value: new THREE.Matrix4() },
-      uExposure: { value: CAD_EXPOSURE },
-      uAmbient: { value: CAD_AMBIENT },
-      uAo: { value: CAD_AO },
-      uHot: { value: 0 },
-      uDim: { value: 0 },
-    },
-    vertexShader: CAD_VERT,
-    fragmentShader: CAD_FRAG,
-    // Premultiplied, matching the splat material, so both can fade over the same
-    // black without a second blend mode in the scene.
-    transparent: true,
-    blending: THREE.CustomBlending,
-    blendSrc: THREE.OneFactor,
-    blendDst: THREE.OneMinusSrcAlphaFactor,
-    blendSrcAlpha: THREE.OneFactor,
-    blendDstAlpha: THREE.OneMinusSrcAlphaFactor,
-    // Depth ON, unlike the splats: this is solid geometry and the parts overlap.
-    // Writing depth while fading can misorder a part against itself, which is
-    // invisible on a fading solid and far cheaper than sorting 128k triangles.
-    depthTest: true,
-    depthWrite: true,
-    // Backfaces culled, which halves the rasterisation of a million triangles.
-    // This was DoubleSide, on the belief that decimated CAD shells could not be
-    // trusted to be consistently wound. Measured, they nearly are — and the export
-    // now corrects the rest: it flips the triangles whose winding disagrees with
-    // their own CAD corner normals (203 of 406,422) and reverses any whole part
-    // whose normals face inward (none do). 99.99% agreement afterwards; the
-    // remainder are zero-area slivers with no meaningful geometric normal, which
-    // cull harmlessly. gl_FrontFacing in the shader is therefore always true, so the
-    // normal is used as it comes.
-    side: THREE.FrontSide,
-  });
+// One layer's pair of materials. Same source, same uniforms OBJECT — three keeps
+// the reference it is handed rather than cloning it, so the frame loop goes on
+// writing the layer's rig, fade and peel to one place and neither variant can
+// fall out of step with the other.
+//
+// They differ in the PEEL define, which three folds into the program cache key
+// even for a RawShaderMaterial, so this is two linked programs across the whole
+// diagram and not two per layer. See the dissolve block in CAD_FRAG for why the
+// two exist; the split also lets each carry the blend state it always wanted
+// rather than having the frame loop toggle three flags on one material every
+// frame:
+//
+//   solid  depth-writing, and opaque the moment it stops fading. Never discards,
+//          so early-z and tile-based HSR both work on the seated stack.
+//   peel   always transparent, never depth-writing. A survivor at 0.25 alpha
+//          writing depth kills whatever draws behind it, and during a peel what
+//          draws behind it is the far side of the same shell: the tracery would
+//          go solid-looking and hollow at once, which is precisely the structure
+//          the beat is selling.
+function cadMaterials() {
+  const uniforms = {
+    uFade: { value: 0 },
+    uCamPos: { value: new THREE.Vector3(0, 0, 10) },
+    uViewProj: { value: new THREE.Matrix4() },
+    // Seeded at the walk's values, since that is the condition the machine is
+    // first drawn in; the frame loop crossfades all four to the finale's fitted
+    // set on `fe`.
+    uExposure: { value: WALK_EXPOSURE },
+    uAmbient: { value: WALK_AMBIENT },
+    uAo: { value: WALK_AO },
+    uAoDirect: { value: WALK_AO_DIRECT },
+    uHot: { value: 0 },
+    uDim: { value: 0 },
+    uAccent: { value: 0 },
+    uPeel: { value: 0 },
+    uPeelBand: { value: PEEL_BAND },
+    uPeelGrain: { value: PEEL_GRAIN },
+  };
+  const make = (peel: boolean) =>
+    new THREE.RawShaderMaterial({
+      glslVersion: THREE.GLSL3,
+      defines: peel ? { PEEL: 1 } : {},
+      uniforms,
+      vertexShader: CAD_VERT,
+      fragmentShader: CAD_FRAG,
+      // Premultiplied, matching the splat material, so both can fade over the same
+      // black without a second blend mode in the scene.
+      transparent: true,
+      blending: THREE.CustomBlending,
+      blendSrc: THREE.OneFactor,
+      blendDst: THREE.OneMinusSrcAlphaFactor,
+      blendSrcAlpha: THREE.OneFactor,
+      blendDstAlpha: THREE.OneMinusSrcAlphaFactor,
+      // Depth ON for the solid variant, unlike the splats: this is solid geometry
+      // and the parts overlap. Writing depth while a whole layer fades UNIFORMLY
+      // can misorder a part against itself, which is invisible at uniform alpha
+      // and far cheaper than sorting 128k triangles.
+      depthTest: true,
+      depthWrite: !peel,
+      // Backfaces culled, which halves the rasterisation of a million triangles.
+      // This was DoubleSide, on the belief that decimated CAD shells could not be
+      // trusted to be consistently wound. Measured, they nearly are — and the export
+      // now corrects the rest: it flips the triangles whose winding disagrees with
+      // their own CAD corner normals (203 of 406,422) and reverses any whole part
+      // whose normals face inward (none do). 99.99% agreement afterwards; the
+      // remainder are zero-area slivers with no meaningful geometric normal, which
+      // cull harmlessly. gl_FrontFacing in the shader is therefore always true, so the
+      // normal is used as it comes.
+      side: THREE.FrontSide,
+    });
+  return { solid: make(false), peel: make(true) };
 }
 
 // 'CAD4' u32 magic
@@ -1624,13 +1775,22 @@ function parseCadLayers(ab: ArrayBuffer, indexAb: ArrayBuffer): CadLayer[] | nul
     palMr[p * 2 + 1] = iv.getUint8(o + 13) / 255;
   }
 
+  // World surface area per palette entry, instance-weighted, accumulated as the
+  // shapes are unpacked below. It costs nothing to collect — the detail channel's
+
   // One shape: dequantise and de-interleave once, on load. The file's layout is the
   // compact one; the GPU gets float positions and normals, because unpacking
   // octahedral normals per vertex in the shader would cost more than the bytes it
   // saves in VRAM.
-  function buildGroup(
-    gi: number
-  ): { geo: THREE.BufferGeometry; mats: Float32Array; planR: number } | null {
+  function buildGroup(gi: number): {
+    geo: THREE.BufferGeometry;
+    mats: Float32Array;
+    planR: number;
+    coarse: Float32Array;
+    varea: Float32Array;
+    mra: Uint8Array;
+    iscale: number;
+  } | null {
     const o = groupBase + gi * CAD_GROUP_REC;
     const vbase = iv.getUint32(o, true);
     const nverts = iv.getUint32(o + 4, true);
@@ -1657,10 +1817,15 @@ function parseCadLayers(ab: ArrayBuffer, indexAb: ArrayBuffer): CadLayer[] | nul
     const pos = new Float32Array(nverts * 3);
     const nrm = new Float32Array(nverts * 3);
     const col = new Float32Array(nverts * 3);
-    const mra = new Uint8Array(nverts * 3);
+    // metallic, roughness, occlusion, DETAIL. The fourth channel is not in the
+    // file — it is measured below from the decimated triangles themselves.
+    const mra = new Uint8Array(nverts * 4);
+    // Which palette entry each vertex came from, kept so the paint grade can
+    // rewrite the colours once it knows which entry covers the most surface.
     for (let v = 0; v < nverts; v++) {
       const s = v * 6;
       const d = v * 3;
+      const m = v * 4;
       pos[d] = qx + u16[s] * sx;
       pos[d + 1] = qy + u16[s + 1] * sy;
       pos[d + 2] = qz + u16[s + 2] * sz;
@@ -1676,7 +1841,7 @@ function parseCadLayers(ab: ArrayBuffer, indexAb: ArrayBuffer): CadLayer[] | nul
         nx = (1 - Math.abs(ny)) * (ax >= 0 ? 1 : -1);
         ny = (1 - Math.abs(ax)) * (ny >= 0 ? 1 : -1);
       }
-      const inv = 1 / Math.hypot(nx, ny, nz);
+      const inv = 1 / Math.sqrt(nx * nx + ny * ny + nz * nz);
       nrm[d] = nx * inv;
       nrm[d + 1] = ny * inv;
       nrm[d + 2] = nz * inv;
@@ -1685,24 +1850,109 @@ function parseCadLayers(ab: ArrayBuffer, indexAb: ArrayBuffer): CadLayer[] | nul
       col[d] = palCol[pi * 3];
       col[d + 1] = palCol[pi * 3 + 1];
       col[d + 2] = palCol[pi * 3 + 2];
-      mra[d] = Math.round(palMr[pi * 2] * 255);
-      mra[d + 1] = Math.round(palMr[pi * 2 + 1] * 255);
-      mra[d + 2] = u8[v * stride + 11];
+      mra[m] = Math.round(palMr[pi * 2] * 255);
+      mra[m + 1] = Math.round(palMr[pi * 2 + 1] * 255);
+      mra[m + 2] = u8[v * stride + 11];
     }
 
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
     geo.setAttribute('normal', new THREE.BufferAttribute(nrm, 3));
     geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
-    geo.setAttribute('mra', new THREE.BufferAttribute(mra, 3, true));
-    geo.setIndex(
-      new THREE.BufferAttribute(
-        iw === 2
-          ? new Uint16Array(ab, vbytes + ibyte, nidx)
-          : new Uint32Array(ab, vbytes + ibyte, nidx),
-        1
-      )
-    );
+    geo.setAttribute('mra', new THREE.BufferAttribute(mra, 4, true));
+    const idx =
+      iw === 2
+        ? new Uint16Array(ab, vbytes + ibyte, nidx)
+        : new Uint32Array(ab, vbytes + ibyte, nidx);
+    geo.setIndex(new THREE.BufferAttribute(idx, 1));
+
+    // ------------------------------------------------------- the detail channel
+    // What drives the teardown's dissolve, and the reason it did not have to be
+    // exported: THE DECIMATOR HAS ALREADY DONE THE FREQUENCY ANALYSIS. Quadric
+    // edge collapse removes triangles wherever removing them costs little — which
+    // is precisely the flat, low-frequency area: panels, skirts, the outer skin —
+    // and keeps them where the surface bends: edges, fillets, fastener heads, the
+    // perforations in the storage tracks.
+    //
+    // So EVERY PRIMITIVE HAS A SIZE, AND THAT SIZE MEANS SOMETHING. Post-decimation
+    // triangle size is a per-primitive frequency channel sitting in the geometry
+    // for free, needing no analysis — in exactly the way a 3DGS optimiser's
+    // gaussian scale was, which is what let the teardown move onto meshes without
+    // losing its one native effect. That was the argument the gaussian pipeline was
+    // chosen for in the first place, and it turns out not to have been an argument
+    // about gaussians at all.
+    //
+    // Key opacity to it and a layer does not fade, it SKELETONISES: its surfaces
+    // evaporate biggest-first while its detail persists, so the shell opens into a
+    // tracery of its own edges and the mechanism inside shows through the holes.
+    // The surviving detail is still THERE, in space, occluding and being occluded —
+    // which is what makes it a reveal rather than a texture effect painted over one.
+    //
+    // Measured as sqrt(area) rather than area so it is a LENGTH: areas across this
+    // assembly span four orders of magnitude and the percentile fit below behaves
+    // far better on the square root of that. Accumulated per vertex over the
+    // adjacent triangles, because the shader interpolates a vertex attribute and a
+    // per-face value would have to be duplicated per corner.
+    //
+    // `varea` is the surface each vertex is answerable for — a third of every
+    // triangle it belongs to — and it is what the layer fit downstream weights by.
+    // A vertex is not a unit of anything the eye can see: the decimator leaves
+    // hundreds of them around one fastener head and four across a whole panel, so
+    // counting them ranks the machine by where the mesh is dense rather than by
+    // where the SURFACE is, which is the opposite of what the dissolve reads.
+    const coarse = new Float32Array(nverts);
+    const adj = new Float32Array(nverts);
+    const varea = new Float32Array(nverts);
+    // Cumulative local triangle area, one entry per triangle. Nothing in the
+    // teardown reads it — it is what the word's particles are sampled against, and
+    // it is emitted HERE because this loop already has every triangle's area in
+    // hand. sampleCadSurface used to walk all 406,422 triangles a second time to
+    // rebuild exactly this, cache-cold, after a setCad and a React commit had
+    // pushed the 7.3 MB of positions and indices back out of L2.
+    const cdf = new Float32Array(Math.max(0, Math.floor(nidx / 3)));
+    let cdfRun = 0;
+    for (let t = 0; t + 2 < nidx; t += 3) {
+      const a = idx[t];
+      const b = idx[t + 1];
+      const c = idx[t + 2];
+      const ax = pos[a * 3];
+      const ay = pos[a * 3 + 1];
+      const az = pos[a * 3 + 2];
+      const e1x = pos[b * 3] - ax;
+      const e1y = pos[b * 3 + 1] - ay;
+      const e1z = pos[b * 3 + 2] - az;
+      const e2x = pos[c * 3] - ax;
+      const e2y = pos[c * 3 + 1] - ay;
+      const e2z = pos[c * 3 + 2] - az;
+      const cxp = e1y * e2z - e1z * e2y;
+      const cyp = e1z * e2x - e1x * e2z;
+      const czp = e1x * e2y - e1y * e2x;
+      // Not Math.hypot. V8 implements it with overflow-safe scaling, which is
+      // 2.2x the cost of the three multiplies and a sqrt — measured, this loop
+      // plus the octahedral decode above run 17.0 ms with hypot and 10.1 ms
+      // without, over the shipped 120 shapes. Overflow is not reachable here:
+      // these are world units between 1e-3 and 1e-1, on geometry the exporter has
+      // already verified. Keep hypot anywhere the magnitudes are not known.
+      const ar = 0.5 * Math.sqrt(cxp * cxp + cyp * cyp + czp * czp);
+      cdfRun += ar;
+      cdf[t / 3] = cdfRun;
+      const len = Math.sqrt(ar);
+      coarse[a] += len;
+      coarse[b] += len;
+      coarse[c] += len;
+      adj[a]++;
+      adj[b]++;
+      adj[c]++;
+      varea[a] += ar / 3;
+      varea[b] += ar / 3;
+      varea[c] += ar / 3;
+    }
+    for (let v = 0; v < nverts; v++) coarse[v] = adj[v] > 0 ? coarse[v] / adj[v] : 0;
+    // Carried on the geometry rather than returned, because the consumer is a
+    // separate pass that only has the geometry to key off. Dropped once it has
+    // read it — see the end of sampleCadSurface.
+    geo.userData.cdf = cdf;
+    geo.userData.area = cdfRun;
 
     // Instance matrices, stored 3x4 row-major and expanded to the column-major mat4
     // three wants.
@@ -1752,14 +2002,25 @@ function parseCadLayers(ab: ArrayBuffer, indexAb: ArrayBuffer): CadLayer[] | nul
     const rad = Math.sqrt(r2);
 
     let planR = 0;
+    // The shape's instance scale, which the detail fit below needs: vertices are
+    // stored in the part's own local space, so two shapes can carry identical
+    // local triangle sizes and still land on screen at very different ones. Every
+    // transform here was verified to be a similarity at export time, so a single
+    // scalar describes it exactly.
+    let iscale = 0;
     for (let k = 0; k < ninst; k++) {
       const m = mats.subarray(k * 16, k * 16 + 16);
       const wx = m[0] * cx + m[4] * cy + m[8] * cz + m[12];
       const wz = m[2] * cx + m[6] * cy + m[10] * cz + m[14];
       const scale = Math.hypot(m[0], m[1], m[2]);
+      iscale = Math.max(iscale, scale);
       planR = Math.max(planR, Math.hypot(wx, wz) + rad * scale);
     }
-    return { geo, mats, planR };
+    // Area as it reaches the screen: this shape is drawn ninst times, and the
+    // instance transform is a similarity, so area scales by its square.
+    const isc = iscale || 1;
+    const wArea = isc * isc * ninst;
+    return { geo, mats, planR, coarse, varea, mra, iscale: isc };
   }
 
   const layers: {
@@ -1793,20 +2054,34 @@ function parseCadLayers(ab: ArrayBuffer, indexAb: ArrayBuffer): CadLayer[] | nul
 
   const out: CadLayer[] = [];
   for (const r of layers) {
-    const material = cadMaterial();
+    const { solid: material, peel: peelMaterial } = cadMaterials();
     const root = new THREE.Group();
-    // After the splats, which draw with depthTest off and would otherwise paint the
-    // dissolving capture over the drawing replacing it.
+    // After the particle cloud, which draws with depthTest off and would otherwise
+    // paint the dust over the machine it is solidifying into.
     root.renderOrder = 1;
     root.visible = false;
     const meshes: THREE.InstancedMesh[] = [];
     const geometries: THREE.BufferGeometry[] = [];
+    const parts: {
+      coarse: Float32Array;
+      varea: Float32Array;
+      mra: Uint8Array;
+      iscale: number;
+      ninst: number;
+    }[] = [];
     let planR = 0;
     for (let gi = r.gbase; gi < r.gbase + r.ngroups; gi++) {
       const built = buildGroup(gi);
       if (!built) return null;
       planR = Math.max(planR, built.planR);
       const ninst = built.mats.length / 16;
+      parts.push({
+        coarse: built.coarse,
+        varea: built.varea,
+        mra: built.mra,
+        iscale: built.iscale,
+        ninst,
+      });
       const im = new THREE.InstancedMesh(built.geo, material, ninst);
       im.instanceMatrix = new THREE.InstancedBufferAttribute(built.mats, 16);
       im.instanceMatrix.needsUpdate = true;
@@ -1818,6 +2093,115 @@ function parseCadLayers(ab: ArrayBuffer, indexAb: ArrayBuffer): CadLayer[] | nul
       root.add(im);
       meshes.push(im);
       geometries.push(built.geo);
+    }
+
+    // Fit the detail channel ACROSS THE LAYER, not per shape. The dissolve is a
+    // property of the subassembly coming off — its big flat plates have to go
+    // before its small fittings do — and a per-shape fit would rank every part
+    // against only itself, so a featureless bracket would evaporate at the same
+    // moment as a bearing race and the order that carries the effect would be
+    // gone. In world units, so a small part magnified by its instance transform
+    // is ranked by the triangle size that actually reaches the screen.
+    //
+    // Percentiles of SURFACE AREA, not of vertex count, and that distinction is
+    // the whole beat rather than a refinement. Fitting on the 5th and 95th
+    // vertex left 40-82% of every layer's area (measured: L0 59%, L2 82%, L4 40%)
+    // clamped flat at detail 0, because the decimator spends its vertices where
+    // the surface bends and the panels — which are most of what you SEE — come out
+    // of it as a handful of huge triangles carrying almost no vertices at all. So
+    // the percentile that was meant to trim slivers was instead trimming the
+    // panels, and everything it trimmed cleared at the same uPeel: the shell went
+    // in one grain-dithered step in the first seventh of the removal instead of
+    // opening in an order. Weighted by area the clamped share is 5-11% a layer,
+    // which is a graded sweep and is what the effect claims to be.
+    //
+    // A handful of sliver triangles at either end still must not take the whole
+    // range — that is what percentiles are for — and weighting by area is also
+    // what makes them harmless, since a sliver's weight is its own area.
+    //
+    // Taken off a BINNED histogram rather than an exact sort, and the reason is
+    // that only two numbers leave this block and they are used to normalise into
+    // a BYTE. An exact weighted percentile has to sort every sample, and that was
+    // by far the most expensive thing on the whole load path: it allocated
+    // 432,431 {v, w} objects — ~20 MB of short-lived heap, handed to the GC at
+    // the exact moment the page wants to upload 19 MB of buffers — and sorting
+    // them was four fifths of the parse.
+    //
+    // Measured on the shipped binary, whole function, unpack and detail channel
+    // and fit: 99.3 ms with the sort, 13.9 ms with a 4096-bin area-weighted
+    // histogram over the same samples.
+    //
+    // And the two agree to within what a byte can carry. Comparing the shipped
+    // detail channel vertex by vertex across all 432,454 of them: 3,022 differ
+    // (0.7%), every one of them by exactly 1 code out of 255 — i.e. only where
+    // the exact answer already sat on a rounding boundary. The comment above this
+    // one is the finding that carried the beat; this is only how it is computed.
+    const DETAIL_BINS = 4096;
+    let lo = Infinity;
+    let hi = -Infinity;
+    let wTotal = 0;
+    for (const pt of parts) {
+      // Area reaching the screen, not area in the part's own space: a shape is
+      // stored once and drawn ninst times, and its local units are scaled by the
+      // instance transform (a similarity, so area scales by the square).
+      const iw = pt.iscale * pt.iscale * pt.ninst;
+      for (let v = 0; v < pt.coarse.length; v++) {
+        const w = pt.varea[v] * iw;
+        if (w <= 0) continue;
+        const x = pt.coarse[v] * pt.iscale;
+        if (x < lo) lo = x;
+        if (x > hi) hi = x;
+        wTotal += w;
+      }
+    }
+    let p05 = 0;
+    let p95 = 0;
+    if (wTotal > 0) {
+      // The range is set by the true extremes, so one enormous sliver would widen
+      // every bin. Measured on this geometry, slivers included, that costs the
+      // hundredths of a code quoted above — it degrades resolution gracefully
+      // rather than failing.
+      const range = Math.max(1e-12, hi - lo);
+      const inv = DETAIL_BINS / range;
+      const bins = new Float64Array(DETAIL_BINS + 1);
+      for (const pt of parts) {
+        const iw = pt.iscale * pt.iscale * pt.ninst;
+        for (let v = 0; v < pt.coarse.length; v++) {
+          const w = pt.varea[v] * iw;
+          if (w <= 0) continue;
+          let b = ((pt.coarse[v] * pt.iscale - lo) * inv) | 0;
+          if (b < 0) b = 0;
+          else if (b > DETAIL_BINS) b = DETAIL_BINS;
+          bins[b] += w;
+        }
+      }
+      // Bin CENTRES, which is what keeps the error symmetric — taking the low
+      // edge would bias both percentiles down by half a bin.
+      p05 = lo;
+      p95 = hi;
+      let acc = 0;
+      let got05 = false;
+      for (let b = 0; b <= DETAIL_BINS; b++) {
+        acc += bins[b];
+        const centre = lo + (b + 0.5) / inv;
+        if (!got05 && acc >= 0.05 * wTotal) {
+          p05 = centre;
+          got05 = true;
+        }
+        if (acc >= 0.95 * wTotal) {
+          p95 = centre;
+          break;
+        }
+      }
+    }
+    const span = Math.max(1e-9, p95 - p05);
+    for (const pt of parts) {
+      for (let v = 0; v < pt.coarse.length; v++) {
+        // 1 = fine detail (small triangles, survives longest), 0 = coarse flat area
+        // (big triangles, evaporates first).
+        const w = (pt.coarse[v] * pt.iscale - p05) / span;
+        pt.mra[v * 4 + 3] = Math.round(255 * Math.max(0, Math.min(1, 1 - w)));
+      }
     }
 
     const t =
@@ -1836,6 +2220,7 @@ function parseCadLayers(ab: ArrayBuffer, indexAb: ArrayBuffer): CadLayer[] | nul
       meshes,
       geometries,
       material,
+      peelMaterial,
       root,
       minY: r.lo[1],
       maxY: r.hi[1],
@@ -1852,166 +2237,325 @@ function parseCadLayers(ab: ArrayBuffer, indexAb: ArrayBuffer): CadLayer[] | nul
       alpha: 1,
     });
   }
+
   return out;
 }
 
-// A bare point cloud (STL path) has no gaussians — give every point the same
-// small isotropic one so it still renders through the splat pipeline.
-function synthesiseSplats(ab: ArrayBuffer, limit: number): ModelSource {
-  const all = new Float32Array(ab);
-  const count = Math.min(Math.floor(all.length / 3), limit);
-  const pos = all.subarray(0, count * 3);
-  const scale = new Float32Array(count * 3).fill(0.01);
-  const quat = new Float32Array(count * 4);
-  const color = new Float32Array(count * 3);
-  const opacity = new Float32Array(count).fill(0.9);
-  for (let i = 0; i < count; i++) quat[i * 4 + 3] = 1; // identity
-  return { count, pos, scale, quat, color, opacity, photoreal: false, layers: null };
+// The word's particles, sampled off the machine's own surface.
+//
+// The lockup's dust has to land somewhere, and where it lands is what the morph
+// resolves into. Taking those points from the CAD means the particle cloud and the
+// shaded mesh describe the same object to within a particle's width, so the
+// handover at the end of the morph is a SOLIDIFICATION rather than a cross-fade
+// between two different descriptions of the machine. It also costs nothing to
+// download: these points are derived from geometry that is already on the wire for
+// the teardown, which is how the hero lost ~10 MB without losing a beat.
+//
+// AREA-WEIGHTED, and that is the whole trick. Sampling per triangle instead would
+// crowd points onto the decimator's small detail triangles and leave the big flat
+// panels bare — precisely inverting the density the eye expects, and precisely
+// inverting the detail channel the teardown reads off the same triangles.
+//
+// And the points are SHADED here, not merely coloured. The palette is linear scene
+// radiance; the splat shader writes what it is given straight to the drawing
+// buffer with no tone map and no encode, because the format it was written for —
+// .splat u8 colour — was already display-referred and this one is not. Handing it
+// raw albedo crushes the darks and clips the lights: a mid grey lands at 55 where
+// the encode alone would put it at 128, and the metals go to near-black holes. So
+// across the handover the viewer watched a flat high-contrast albedo cloud
+// dissolve into a soft AgX render — two different pictures of the same object,
+// which is the exact cross-fade the whole "solidification in register" premise
+// exists to avoid. Lighting each point through the same rig and the same view
+// transform the mesh uses is what makes the two one picture.
+function sampleCadSurface(cad: CadLayer[], limit: number): ModelSource | null {
+  type Piece = {
+    pos: Float32Array;
+    col: Float32Array;
+    nrm: Float32Array;
+    mra: Uint8Array;
+    idx: ArrayLike<number>;
+    cdf: Float32Array; // cumulative LOCAL triangle area, one entry per triangle
+    m: THREE.Matrix4;
+    // The instance's rotation with the group's own handover orientation already
+    // folded in, so a sampled normal reaches the rig in one multiply.
+    nm: THREE.Matrix3;
+    area: number; // this instance's world area
+  };
+  // The rig is defined in RENDER-WORLD space, which includes the group's live
+  // rotation — and these colours are baked once at load. So they are evaluated at
+  // the orientation the group holds at the HANDOVER: the morph ramp has finished,
+  // so the pitch and yaw are at rest and the drift has barely started. That is the
+  // one moment the cloud and the mesh have to be indistinguishable; before it the
+  // cloud is still becoming the machine and there is nothing to compare it to.
+  const handoff = new THREE.Matrix3().setFromMatrix4(
+    new THREE.Matrix4()
+      .makeRotationX(MODEL_PITCH)
+      .multiply(new THREE.Matrix4().makeRotationY(MODEL_YAW))
+  );
+  // The CDF is per distinct SHAPE and shared by its instances — the machine is
+  // four-fold symmetric and full of repeated bearings, so one per shape is
+  // roughly a quarter of the work one per instance would be. It is not built
+  // here: parseCadLayers already walked every triangle to measure the detail
+  // channel and left the running area on the geometry. See buildGroup.
+  const geos: THREE.BufferGeometry[] = [];
+  const pieces: Piece[] = [];
+  let world = 0;
+
+  for (const layer of cad) {
+    for (const im of layer.meshes) {
+      const geo = im.geometry;
+      const posAttr = geo.getAttribute('position');
+      const colAttr = geo.getAttribute('color');
+      const nrmAttr = geo.getAttribute('normal');
+      const mraAttr = geo.getAttribute('mra');
+      const index = geo.getIndex();
+      if (!posAttr || !colAttr || !nrmAttr || !mraAttr || !index) continue;
+      const pos = posAttr.array as Float32Array;
+      const col = colAttr.array as Float32Array;
+      const nrm = nrmAttr.array as Float32Array;
+      const mra = mraAttr.array as Uint8Array;
+      const idx = index.array as ArrayLike<number>;
+
+      const cdf = geo.userData.cdf as Float32Array | undefined;
+      const total = geo.userData.area as number | undefined;
+      if (!cdf || !total || total <= 0) continue;
+      geos.push(geo);
+
+      const mats = im.instanceMatrix.array as Float32Array;
+      for (let k = 0; k < im.count; k++) {
+        const m = new THREE.Matrix4().fromArray(mats, k * 16);
+        // Every transform in this assembly was verified to be a similarity at
+        // export time, so one scalar describes it and area scales by its square.
+        const s = Math.hypot(mats[k * 16], mats[k * 16 + 1], mats[k * 16 + 2]);
+        const area = total * s * s;
+        if (area <= 0) continue;
+        world += area;
+        const nm = new THREE.Matrix3().setFromMatrix4(m).premultiply(handoff);
+        pieces.push({ pos, col, nrm, mra, idx, cdf, m, nm, area });
+      }
+    }
+  }
+  if (!pieces.length || world <= 0) return null;
+
+  // Deterministic, so the lockup is made of the same grains on every load. A brand
+  // mark that reshuffles its own dust between reloads is a brand mark that looks
+  // slightly different every time anyone sees it.
+  let seed = 0x9e3779b9;
+  const rnd = () => {
+    seed |= 0;
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+
+  const count = Math.max(1, Math.min(limit, 200000));
+  const outPos = new Float32Array(count * 3);
+  const outCol = new Float32Array(count * 3);
+  const outRadius = new Float32Array(count);
+  const outOpacity = new Float32Array(count);
+  // Mean spacing at this density. The particle is sized just past it so the cloud
+  // reads as a surface rather than as a starfield of separated dots.
+  const dot = Math.sqrt(world / count) * 0.62;
+
+  const v = new THREE.Vector3();
+  const nv = new THREE.Vector3();
+  // Scratch for one particle's linear radiance, then its shaded result in place.
+  // Allocated once: at 150,000 particles a fresh triple per particle is 150,000
+  // short-lived arrays for no reason, on the pass that already has the tightest
+  // loop in the file.
+  const lin: [number, number, number] = [0, 0, 0];
+  // The sky's diffuse irradiance for a normal, exactly as CAD_FRAG folds it: the
+  // gradient in the normal's direction, plus a constant zenith share.
+  const irrOf = (y: number, ch: number) => {
+    const to = y > 0 ? SKY_ZENITH[ch] : SKY_GROUND[ch];
+    return lerp(
+      lerp(SKY_HORIZON[ch], to, Math.sqrt(Math.abs(y))),
+      SKY_ZENITH[ch],
+      SKY_ZENITH_SHARE
+    );
+  };
+  let w = 0;
+  for (let pi = 0; pi < pieces.length && w < count; pi++) {
+    const piece = pieces[pi];
+    // Proportional allocation, with the remainder carried by the last piece so
+    // rounding cannot leave the tail of the buffer unwritten.
+    const want =
+      pi === pieces.length - 1
+        ? count - w
+        : Math.min(count - w, Math.round((piece.area / world) * count));
+    const ntri = piece.cdf.length;
+    const total = piece.cdf[ntri - 1];
+    for (let j = 0; j < want; j++, w++) {
+      // Pick a triangle in proportion to its area, by binary search on the CDF.
+      const target = rnd() * total;
+      let lo = 0;
+      let hi = ntri - 1;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (piece.cdf[mid] < target) lo = mid + 1;
+        else hi = mid;
+      }
+      const a = piece.idx[lo * 3];
+      const b = piece.idx[lo * 3 + 1];
+      const c = piece.idx[lo * 3 + 2];
+      // Uniform over the triangle: the fold is what makes it uniform rather than
+      // biased toward the first corner.
+      let u = rnd();
+      let vv = rnd();
+      if (u + vv > 1) {
+        u = 1 - u;
+        vv = 1 - vv;
+      }
+      const wgt = 1 - u - vv;
+      v.set(
+        pos3(piece.pos, a, 0) * wgt + pos3(piece.pos, b, 0) * u + pos3(piece.pos, c, 0) * vv,
+        pos3(piece.pos, a, 1) * wgt + pos3(piece.pos, b, 1) * u + pos3(piece.pos, c, 1) * vv,
+        pos3(piece.pos, a, 2) * wgt + pos3(piece.pos, b, 2) * u + pos3(piece.pos, c, 2) * vv
+      ).applyMatrix4(piece.m);
+      outPos[w * 3] = v.x;
+      outPos[w * 3 + 1] = v.y;
+      outPos[w * 3 + 2] = v.z;
+
+      // Shade it, off the same three attributes the mesh reads at this point.
+      nv.set(
+        pos3(piece.nrm, a, 0) * wgt + pos3(piece.nrm, b, 0) * u + pos3(piece.nrm, c, 0) * vv,
+        pos3(piece.nrm, a, 1) * wgt + pos3(piece.nrm, b, 1) * u + pos3(piece.nrm, c, 1) * vv,
+        pos3(piece.nrm, a, 2) * wgt + pos3(piece.nrm, b, 2) * u + pos3(piece.nrm, c, 2) * vv
+      )
+        .applyMatrix3(piece.nm)
+        .normalize();
+      // Baked occlusion, the third byte of mra. The fourth is the detail channel
+      // and the first two are metallic and roughness, which this pass does not
+      // read — see below.
+      const occ =
+        (piece.mra[a * 4 + 2] * wgt + piece.mra[b * 4 + 2] * u + piece.mra[c * 4 + 2] * vv) / 255;
+      const ao = 1 + (occ - 1) * WALK_AO;
+      const direct = 1 + (ao - 1) * WALK_AO_DIRECT;
+      const ambK = WALK_AMBIENT * ao;
+      // DIFFUSE ONLY, and everything treated as a dielectric of its own palette
+      // colour. At the handover the machine is a few hundred pixels of ~8px
+      // splats, where a specular lobe is not resolvable and a mirror is just a
+      // patch of whatever it is reflecting; lighting a metal's base colour
+      // diffusely lands it at about the grey the shaded mesh puts there, whereas
+      // multiplying albedo by (1 - metallic) as the BRDF does would make every
+      // metal a black hole in the cloud.
+      //
+      // The lamp sum is outside the channel loop because it does not depend on
+      // the channel: the rig is white, so the four dot products and the
+      // accumulate are one number that all three channels multiply their own
+      // albedo by. Inside, it was 1.8M dot products where 600k do.
+      let d = 0;
+      for (let li = 0; li < LDIR.length; li++) {
+        const NoL = nv.x * LDIR[li][0] + nv.y * LDIR[li][1] + nv.z * LDIR[li][2];
+        if (NoL > 0) d += (LPOW[li] * NoL) / Math.PI;
+      }
+      d *= direct;
+      for (let ch = 0; ch < 3; ch++) {
+        const alb =
+          pos3(piece.col, a, ch) * wgt + pos3(piece.col, b, ch) * u + pos3(piece.col, c, ch) * vv;
+        lin[ch] = alb * (d + irrOf(nv.y, ch) * ambK) * WALK_EXPOSURE;
+      }
+      agxJs(lin[0], lin[1], lin[2], lin);
+      outCol[w * 3] = encodeSrgbJs(lin[0]);
+      outCol[w * 3 + 1] = encodeSrgbJs(lin[1]);
+      outCol[w * 3 + 2] = encodeSrgbJs(lin[2]);
+      outRadius[w] = dot;
+      outOpacity[w] = 1;
+    }
+  }
+
+  // Nothing reads the area CDFs after this: the teardown keys off the detail
+  // channel, and the particles are sampled exactly once. 1.6 MB across the 120
+  // shapes, dropped rather than held for the life of the page.
+  for (const geo of geos) {
+    delete geo.userData.cdf;
+    delete geo.userData.area;
+  }
+
+  return { count: w, pos: outPos, radius: outRadius, color: outCol, opacity: outOpacity };
+}
+
+function pos3(a: Float32Array, i: number, ch: number) {
+  return a[i * 3 + ch];
 }
 
 const TEX_W = 2048;
-const TEXELS_PER_SPLAT = 8;
+// Five RGBA texels a particle: two travel origins, its seat on the machine, and
+// its two colours. It was EIGHT while the cloud was a 3DGS capture. The three that
+// went described things this cloud does not have — a quaternion and an
+// anisotropic scale, for an ellipsoid that is now a sphere; a radial blast target,
+// an axial exit distance and a top-first peel order, for a teardown that now
+// happens on the meshes. At the desktop particle count that is 19.2 MB of float
+// texture down to 12.0 MB, and the same share off the build loop that fills it.
+const TEXELS_PER_SPLAT = 5;
 
 type SplatData = {
   count: number;
   texture: THREE.DataTexture;
   // CPU copies of the animated centres — the depth sort needs to know where each
-  // splat currently is, and the morph itself runs on the GPU.
+  // particle currently is, and the morph itself runs on the GPU.
   scatterA: Float32Array;
   textHome: Float32Array;
   modelHome: Float32Array;
-  // Single-capture fallback: the radial blast target. In sequence mode the same
-  // three texture slots carry the arrival instead — (convergence rank, grain,
-  // unused) — because a capture in a sequence never blasts anywhere.
-  scatterB: Float32Array;
   delayForm: Float32Array;
   delayMorph: Float32Array;
-  delayBlast: Float32Array;
-  // Teardown (sequence mode only): where this splat sits in its layer's
-  // top-first order, and how far the layer carries it when it is removed. The
-  // depth sort has to reproduce the shader's travel exactly or the two captures
-  // interleave in the wrong order right where they overlap most.
-  phase: Float32Array;
-  exit: Float32Array;
-  // The captures to walk through, when the cloud is a sequence rather than one
-  // model. Null keeps the old single-capture behaviour, radial blast and all.
-  layers: LayerRange[] | null;
 };
 
-// Build the whole system: each splat knows its fly-in origin, its seat in the
-// text, its place on the model, and where it goes when the model tears apart.
-// All of it is packed into a float texture and morphed in the vertex shader —
-// at 150k splats a per-frame CPU lerp would not hold 60fps.
 function buildSplatData(text: string, src: ModelSource): SplatData {
   // Poster type is shouted: uppercase the latin, CJK passes through unchanged.
   const { coords, cw, ch } = sampleLockup(text.toUpperCase());
   const textCount = Math.max(1, coords.length / COORD_STRIDE);
   const count = src.count;
 
-  const layers = src.layers;
-  // Which capture each splat belongs to, and where it sits inside that capture.
-  // The text beat needs the second one: a splat's seat in the word has to be
-  // spread across the whole lockup relative to *its own capture*, because only
-  // one capture is drawn at a time. Keyed on the global index instead and each
-  // capture would render one ninth of the word.
-  const layerOf = new Float32Array(count);
-  const localIdx = new Float32Array(count);
-  const localOf = new Float32Array(count);
-  if (layers) {
-    layers.forEach((r, li) => {
-      for (let j = 0; j < r.count; j++) {
-        layerOf[r.offset + j] = li;
-        localIdx[r.offset + j] = j;
-        localOf[r.offset + j] = r.count;
-      }
-    });
-  } else {
-    for (let k = 0; k < count; k++) {
-      localIdx[k] = k;
-      localOf[k] = count;
-    }
-  }
   const scatterA = new Float32Array(count * 3);
   const textHome = new Float32Array(count * 3);
   const modelHome = new Float32Array(count * 3);
-  const scatterB = new Float32Array(count * 3);
   const delayForm = new Float32Array(count);
   const delayMorph = new Float32Array(count);
-  const delayBlast = new Float32Array(count);
-  const phase = new Float32Array(count);
-  const exit = new Float32Array(count);
-
-  // Coarse-to-fine order for the arrival, one ranking per capture: 0 is the
-  // biggest gaussian in its layer, 1 the smallest. A 3DGS optimiser starts with
-  // a few large blobs and densifies into fine ones, so resolving in this order
-  // is what makes an arriving layer read as being TRAINED into place rather than
-  // faded in — the one thing in the whole hero that only a gaussian cloud can do.
-  //
-  // Ranked by histogram rather than by sorting. A comparison sort of 325k splats
-  // runs on the main thread inside the same blocking build as the 40 MB texture;
-  // a 512-bin cumulative histogram is O(n), and the rank only has to be a
-  // percentile. Binned on log size because 3DGS scales are heavy-tailed — linear
-  // bins put ~99% of every capture in the first one.
-  const rank = new Float32Array(count);
-  if (layers) {
-    const BINS = 512;
-    const hist = new Uint32Array(BINS);
-    const cum = new Float32Array(BINS);
-    const key = new Float32Array(Math.max(1, ...layers.map((r) => r.count)));
-    for (const r of layers) {
-      hist.fill(0);
-      let lo = Infinity;
-      let hi = -Infinity;
-      for (let j = 0; j < r.count; j++) {
-        const s3 = (r.offset + j) * 3;
-        const a = Math.log(
-          Math.max(1e-6, src.scale[s3], src.scale[s3 + 1], src.scale[s3 + 2])
-        );
-        key[j] = a;
-        if (a < lo) lo = a;
-        if (a > hi) hi = a;
-      }
-      const sc = hi > lo ? (BINS - 1) / (hi - lo) : 0;
-      for (let j = 0; j < r.count; j++) hist[((key[j] - lo) * sc) | 0]++;
-      // Cumulated from the TOP bin down, so the biggest gaussians get rank ~0.
-      let acc = 0;
-      for (let b = BINS - 1; b >= 0; b--) {
-        cum[b] = acc / Math.max(1, r.count);
-        acc += hist[b];
-      }
-      for (let j = 0; j < r.count; j++) rank[r.offset + j] = cum[((key[j] - lo) * sc) | 0];
-    }
-  }
 
   // Fit the poster to the viewport: the camera rests at z=10 with fov 50, so
   // the visible width at the word's plane (z=0) is 2*tan(25°)*10*aspect ≈
   // 9.33*aspect world units. Desktop keeps the full 9-unit poster; narrow
   // screens shrink the lockup so the wordmark is never cropped mid-glyph.
-  const aspect =
-    typeof window !== 'undefined'
-      ? window.innerWidth / Math.max(1, window.innerHeight)
-      : 16 / 9;
-  const worldW = Math.min(9, 9.33 * aspect * 0.92);
-  const worldH = (worldW * ch) / cw; // keep text aspect
+  const vw = typeof window !== 'undefined' ? window.innerWidth : 1600;
+  const vh = typeof window !== 'undefined' ? window.innerHeight : 900;
+  const aspect = vw / Math.max(1, vh);
+  let worldW = Math.min(9, 9.33 * aspect * 0.92);
+  let worldH = (worldW * ch) / cw; // keep text aspect
 
-  // model vertical range, for the fallback gradient
-  let minY = Infinity;
-  let maxY = -Infinity;
-  for (let k = 0; k < count; k++) {
-    const y = src.pos[k * 3 + 1];
-    if (y < minY) minY = y;
-    if (y > maxY) maxY = y;
+  // ...and then fit it to the clear BAND, not to the whole frame.
+  //
+  // The lockup used to be centred on y = 0, which is the middle of the viewport
+  // and not the middle of the space it actually has. Two DOM overlays sit in that
+  // frame and neither is optional: the fixed nav across the top, and the hero copy
+  // block bottom-anchored under it — eyebrow, subtitle and the scroll cue. Centred,
+  // the wordmark's last line landed exactly on the eyebrow: "AUTOMATIC MAHJONG
+  // TABLES" was drawn through the baseline of MANUFACTURING, and the CJK lockup was
+  // worse because its secondary line is set larger.
+  //
+  // Same fix the finale already uses for the same reason (see BAND_TOP): reserve
+  // the bands, fit to what is left, and centre on THAT. In px, because that is what
+  // the overlays are authored in, and applied to worldH as well as worldW so a
+  // short viewport shrinks the poster instead of running it under the copy.
+  const perPx = (2 * CAM_HALF_H) / Math.max(1, vh);
+  const bandTop = CAM_HALF_H - LOCKUP_BAND_TOP * perPx;
+  const bandBottom = -CAM_HALF_H + LOCKUP_BAND_BOTTOM * perPx;
+  const bandH = Math.max(0.5, bandTop - bandBottom);
+  const bandMid = (bandTop + bandBottom) / 2;
+  if (worldH > bandH) {
+    const k = bandH / worldH;
+    worldW *= k;
+    worldH *= k;
   }
 
   // Strict monochrome particles with a rare acid strike — poster ink, not confetti.
   const cSmoke = new THREE.Color('#f5f5f3');
   const cGray = new THREE.Color('#8a8a86');
-  const cAcid = new THREE.Color('#c6ff00');
-  const cCharcoal = new THREE.Color('#2a2a28');
-  const tmp = new THREE.Color();
+  const cAcid = new THREE.Color(ACCENT_HEX);
 
-  // Splats are dealt to coords in a shuffled order: the quality governor trims
-  // by instanceCount (first n splat indices), and a monotone index→coord map
+  // Particles are dealt to coords in a shuffled order: the quality governor trims
+  // by instanceCount (first n particle indices), and a monotone index→coord map
   // would erase the lockup bottom-up on weak devices — the secondary line
   // first. Shuffled, a trim just thins the grain evenly everywhere.
   const coordOf = new Uint32Array(textCount);
@@ -2029,12 +2573,11 @@ function buildSplatData(text: string, src: ModelSource): SplatData {
   for (let k = 0; k < count; k++) {
     const i3 = k * 3;
 
-    // text home: spread the splats evenly across the rasterised text pixels.
-    // ~10+ splats share each sampled pixel, so scatter them across the sampling
+    // text home: spread the particles evenly across the rasterised text pixels.
+    // ~10+ of them share each sampled pixel, so scatter them across the sampling
     // cell — without the jitter they stack into one fat dot per lattice point
     // and the word reads as chunky mush instead of fine grain.
-    const o6 =
-      coordOf[Math.floor((localIdx[k] * textCount) / localOf[k]) % textCount] * COORD_STRIDE;
+    const o6 = coordOf[Math.floor((k * textCount) / count) % textCount] * COORD_STRIDE;
     const tx = coords[o6] ?? cw / 2;
     const ty = coords[o6 + 1] ?? ch / 2;
     // jitter across the cell of the lattice this pixel was sampled on — the
@@ -2043,7 +2586,7 @@ function buildSplatData(text: string, src: ModelSource): SplatData {
     const step = coords[o6 + 5] ?? SAMPLE_STEP;
     const cell = (worldW * step) / cw;
     textHome[i3] = (tx / cw - 0.5) * worldW + (Math.random() - 0.5) * cell;
-    textHome[i3 + 1] = -(ty / ch - 0.5) * worldH + (Math.random() - 0.5) * cell;
+    textHome[i3 + 1] = -(ty / ch - 0.5) * worldH + bandMid + (Math.random() - 0.5) * cell;
     // thin slab: a deep z-jitter blurs the word's edges — and the fine band's
     // small glyphs can afford even less of it
     textHome[i3 + 2] = (Math.random() - 0.5) * (step < SAMPLE_STEP ? 0.08 : 0.18);
@@ -2053,7 +2596,7 @@ function buildSplatData(text: string, src: ModelSource): SplatData {
     modelHome[i3 + 2] = src.pos[i3 + 2];
 
     // fly-in origin: point on a surrounding sphere, kept in front of the camera
-    // (z <= ~4 vs camera z=10) — splats that spawn at the near plane project to
+    // (z <= ~4 vs camera z=10) — particles that spawn at the near plane project to
     // screen-filling blobs and read as static noise.
     const rA = 7 + Math.random() * 8;
     const thA = Math.random() * Math.PI * 2;
@@ -2062,41 +2605,10 @@ function buildSplatData(text: string, src: ModelSource): SplatData {
     scatterA[i3 + 1] = Math.sin(phA) * Math.sin(thA) * rA * 0.75;
     scatterA[i3 + 2] = Math.cos(phA) * rA * 0.65 - 6;
 
-    const mx = modelHome[i3];
-    const my = modelHome[i3 + 1];
-    // In sequence mode this splat never goes anywhere but straight up, so the
-    // three slots that held a scatter target carry the arrival instead: the
-    // convergence rank, a per-splat grain, and one spare. A single capture has
-    // no sequence to walk, so it keeps the radial throw it always had.
-    const rg = layers ? layers[layerOf[k]] : null;
-    if (rg) {
-      scatterB[i3] = rank[k];
-      scatterB[i3 + 1] = Math.random();
-      scatterB[i3 + 2] = 0;
-      // Axial removal distance. Near-identical across the layer — the part is
-      // rigid, and it is the ONE place a few percent of per-splat variation is
-      // worth spending, because a perfectly uniform translation is the tell that
-      // gives away a mesh.
-      exit[k] = rg.exit * (0.96 + Math.random() * 0.08);
-      // Top-first order, used twice: it peels the removal (the lid unsticks
-      // before the base) and it is the scan line the layer underneath resolves
-      // along. Grained with noise so neither reads as a straight wipe.
-      const h = (my - rg.minY) / Math.max(1e-4, rg.maxY - rg.minY);
-      phase[k] = clamp01(lerp(Math.random(), 1 - h, SEQ_HEIGHT_BIAS));
-    } else {
-      const ang = Math.atan2(my, mx) + (Math.random() - 0.5) * 0.8;
-      const dist = 7 + Math.random() * 12;
-      scatterB[i3] = mx + Math.cos(ang) * dist;
-      scatterB[i3 + 1] = my + Math.sin(ang) * dist + (Math.random() - 0.3) * 3;
-      scatterB[i3 + 2] = modelHome[i3 + 2] + (Math.random() - 0.5) * 14;
-    }
-
-    // staggers: assemble left->right, morph ripples randomly. In sequence mode
-    // the blast delay slot carries the capture index instead — see above.
+    // staggers: assemble left->right, morph ripples randomly.
     const nx = textHome[i3] / worldW + 0.5;
     delayForm[k] = Math.min(MAX_FORM_DELAY, Math.max(0, nx * 0.07 + Math.random() * 0.02));
     delayMorph[k] = Math.random() * MAX_MORPH_DELAY;
-    delayBlast[k] = layers ? layerOf[k] : Math.random() * 0.12;
 
     // text colour: the rule/tile pixels keep their drawn acid colour; white ink
     // gets the grain mix — smoke body, a little gray shadow, rare acid strikes.
@@ -2127,28 +2639,7 @@ function buildSplatData(text: string, src: ModelSource): SplatData {
       tb = tc.b;
     }
 
-    // model colour: photoreal from the capture (graded high-contrast B&W in the
-    // shader), else a charcoal->smoke height gradient for the bare CAD cloud
-    let mr: number;
-    let mg: number;
-    let mb: number;
-    if (src.photoreal) {
-      mr = src.color[i3];
-      mg = src.color[i3 + 1];
-      mb = src.color[i3 + 2];
-    } else if (maxY > minY) {
-      tmp.copy(cCharcoal).lerp(cSmoke, (modelHome[i3 + 1] - minY) / (maxY - minY));
-      if (Math.random() < 0.04) tmp.copy(cAcid);
-      mr = tmp.r;
-      mg = tmp.g;
-      mb = tmp.b;
-    } else {
-      mr = tr;
-      mg = tg;
-      mb = tb;
-    }
-
-    // pack 8 RGBA texels per splat (see the fetch() calls in the vertex shader)
+    // pack 5 RGBA texels per particle (see the fetch() calls in the vertex shader)
     const o = k * TEXELS_PER_SPLAT * 4;
     data[o] = scatterA[i3];
     data[o + 1] = scatterA[i3 + 1];
@@ -2161,30 +2652,20 @@ function buildSplatData(text: string, src: ModelSource): SplatData {
     data[o + 8] = modelHome[i3];
     data[o + 9] = modelHome[i3 + 1];
     data[o + 10] = modelHome[i3 + 2];
-    data[o + 11] = delayBlast[k];
-    data[o + 12] = scatterB[i3];
-    data[o + 13] = scatterB[i3 + 1];
-    data[o + 14] = scatterB[i3 + 2];
-    data[o + 15] = src.opacity[k];
-    data[o + 16] = tr;
-    data[o + 17] = tg;
-    data[o + 18] = tb;
-    // per-splat text alpha: the fine band runs ~2x the wordmark's splat
-    // density, so its splats render at ~half alpha — equal ink coverage from
+    data[o + 11] = src.opacity[k];
+    data[o + 12] = tr;
+    data[o + 13] = tg;
+    data[o + 14] = tb;
+    // per-particle text alpha: the fine band runs ~2x the wordmark's particle
+    // density, so its particles render at ~half alpha — equal ink coverage from
     // twice the positions is what keeps small glyph edges sharp
-    data[o + 19] = step < SAMPLE_STEP ? 0.55 : 1;
-    data[o + 20] = mr;
-    data[o + 21] = mg;
-    data[o + 22] = mb;
-    data[o + 23] = exit[k]; // axial removal distance (sequence only; 0 otherwise)
-    data[o + 24] = src.scale[i3];
-    data[o + 25] = src.scale[i3 + 1];
-    data[o + 26] = src.scale[i3 + 2];
-    data[o + 27] = phase[k]; // top-first order (sequence only; 0 otherwise)
-    data[o + 28] = src.quat[k * 4];
-    data[o + 29] = src.quat[k * 4 + 1];
-    data[o + 30] = src.quat[k * 4 + 2];
-    data[o + 31] = src.quat[k * 4 + 3];
+    data[o + 15] = step < SAMPLE_STEP ? 0.55 : 1;
+    // model colour: already shaded and encoded by sampleCadSurface, so it goes to
+    // the shader as display values and nothing further is done to it
+    data[o + 16] = src.color[i3];
+    data[o + 17] = src.color[i3 + 1];
+    data[o + 18] = src.color[i3 + 2];
+    data[o + 19] = src.radius[k];
   }
 
   const texture = new THREE.DataTexture(data, TEX_W, texH, THREE.RGBAFormat, THREE.FloatType);
@@ -2192,29 +2673,22 @@ function buildSplatData(text: string, src: ModelSource): SplatData {
   texture.magFilter = THREE.NearestFilter;
   texture.needsUpdate = true;
 
-  return {
-    count,
-    texture,
-    scatterA,
-    textHome,
-    modelHome,
-    scatterB,
-    delayForm,
-    delayMorph,
-    delayBlast,
-    phase,
-    exit,
-    layers,
-  };
+  return { count, texture, scatterA, textHome, modelHome, delayForm, delayMorph };
 }
 
-const f = (n: number) => n.toFixed(5);
-
-// Gaussian splatting proper: project each 3D gaussian's covariance into a 2D
-// screen-space ellipse, draw it as an instanced quad with exp() falloff, and
-// alpha-blend the lot back-to-front. The morph rides along by lerping the
-// centre/colour and blooming the scale from an isotropic text dot into the
-// captured anisotropic gaussian.
+// The particle cloud, and the whole of what it now does: scatter, assemble into
+// the wordmark, fly to points on the machine's surface, hand over to the mesh.
+// Nothing else — the teardown moved onto the CAD, so the evaporation, the
+// densification, the radial blast, the acid tint, the motion smear and the
+// density LOD that used to live in here are all gone with the captures they were
+// written for.
+//
+// Still splatting proper, because the projection is what makes the dust read as a
+// surface rather than as a starfield: each particle is a 3D gaussian whose
+// covariance is projected into a screen-space ellipse, drawn as an instanced quad
+// with exp() falloff and alpha-blended back to front. The morph rides along by
+// lerping the centre and the colour and blooming the scale from a text dot into
+// the particle's own.
 const SPLAT_VERT = /* glsl */ `
 precision highp float;
 precision highp int;
@@ -2234,43 +2708,11 @@ uniform vec2 uViewport;
 uniform float uTextDot;
 uniform float uTextAlpha;
 uniform float uMaxAxis; // screen-px cap on the projected ellipse — bounds worst-case fill
-uniform float uGrade; // 1 => photoreal capture: grade it into the site's monochrome
-// How much the tear-apart beat dims. A radial blast ends on a noise field and
-// wants to dissolve away; a sequence never blasts at all, so this goes to 0.
-uniform float uBlastFade;
-// Walking the capture sequence: uSequence gates it, uLayer is the (fractional)
-// position in the walk. t2.w carries the splat's capture index in this mode.
-uniform float uSequence;
-uniform float uLayer;
-// Teardown shape — see the SEQ_* block for what each one buys.
-uniform float uEvapEnd;
-uniform float uEvapStagger;
-uniform float uEvapScan;
-uniform float uDeflate;
-uniform float uLiftStart;
-uniform float uPeel;
-uniform float uSmear;
-uniform float uReveal;
-uniform float uDensScan;
-uniform float uGrain;
-uniform float uTint;
-// Hand-over to the closing diagram. The captures do not draw it — CAD does — so
-// all this beat asks of the splats is that the walk's last one dissolves out
-// while its drawing dissolves in, in the same place.
+// The hand-over. The particles fly to points sampled ON the machine's surface, so
+// at the end of the morph the cloud and the mesh are the same picture of the same
+// object to within a particle's width; this is the cloud's half of the swap, and
+// the mesh's uFade is the other half, driven off the same ramp.
 uniform float uSplatOut;
-// The direction a part travels when it is removed, in object space: whatever
-// currently points straight up the SCREEN. It has to be screen-relative and
-// cannot be the machine's own axis, however much the CAD explode says otherwise.
-// The group is pitched 43 degrees to look down at the playfield, so the object's
-// +Y points up AND two thirds of the way toward the camera — a part sent along
-// it does not leave the frame, it flies through the lens, filling the screen
-// with a blurred close-up of its own underside. Every exploded-view drawing ever
-// made separates parts up the page for the same reason.
-uniform vec3 uAxis;
-// Share of splats drawn. Slides down through a handoff (where the image is a
-// smear) and back to 1 on a hold; alpha is paid back by the same factor, so
-// the ink is unchanged and only the fill-rate moves.
-uniform float uDensity;
 uniform vec2 uMouse;  // cursor on the z=0 plane, world units
 uniform float uTime;
 uniform float uRepel;
@@ -2285,209 +2727,70 @@ vec4 fetch(int i, int t) {
 
 float clamp01(float t) { return clamp(t, 0.0, 1.0); }
 float easeOutCubic(float t) { float u = 1.0 - t; return 1.0 - u * u * u; }
-float easeInCubic(float t) { return t * t * t; }
 float smoothstep01(float t) { return t * t * (3.0 - 2.0 * t); }
-
-// Near-total desaturation + contrast punch: silver-gelatin print, not sepia.
-vec3 gradeMono(vec3 c) {
-  float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
-  vec3 d = mix(c, vec3(l), 0.88);
-  d = (d - 0.5) * 1.22 + 0.54;
-  return clamp(d, 0.0, 1.0);
-}
-
-// Integer hash — a stable per-splat draw in [0,1) for the density LOD. sin()
-// hashing breaks down here: iIndex runs to ~325k, and sin(iIndex * 12.9898)
-// loses every bit that mattered to float32 rounding long before that.
-float hash11(uint n) {
-  n = (n ^ 61u) ^ (n >> 16);
-  n *= 9u;
-  n = n ^ (n >> 4);
-  n *= 0x27d4eb2du;
-  n = n ^ (n >> 15);
-  return float(n & 0xffffffu) / 16777216.0;
-}
-
-mat3 quatToMat(vec4 q) {
-  float x = q.x, y = q.y, z = q.z, w = q.w;
-  return mat3(
-    1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y + w * z),       2.0 * (x * z - w * y),
-    2.0 * (x * y - w * z),       1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z + w * x),
-    2.0 * (x * z + w * y),       2.0 * (y * z - w * x),       1.0 - 2.0 * (x * x + y * y)
-  );
-}
 
 void main() {
   int i = int(iIndex);
 
   vec4 t0 = fetch(i, 0); // scatterA.xyz, delayForm
   vec4 t1 = fetch(i, 1); // textHome.xyz, delayMorph
-  vec4 t2 = fetch(i, 2); // modelHome.xyz, delayBlast (== capture index in sequence mode)
-  vec4 t3 = fetch(i, 3); // blast target — (rank, grain, -) in sequence mode; opacity
-  vec4 t4 = fetch(i, 4); // textColor
-  vec4 t5 = fetch(i, 5); // modelColor, axial removal distance
-  vec4 t6 = fetch(i, 6); // scale, top-first order
-  vec4 t7 = fetch(i, 7); // quat xyzw
+  vec4 t2 = fetch(i, 2); // modelHome.xyz, opacity
+  vec4 t3 = fetch(i, 3); // textColor.rgb, per-splat text alpha
+  vec4 t4 = fetch(i, 4); // modelColor.rgb, radius
 
-  float a = easeOutCubic(clamp01((uProgress - t0.w) / ${f(ASSEMBLE_WINDOW)}));
-  float m = smoothstep01(clamp01((uProgress - ${f(MORPH_START)} - t1.w) / ${f(MORPH_END - MORPH_START)}));
+  // The two travels, in order: scatter -> wordmark, then wordmark -> the point
+  // this particle was sampled at on the machine's surface. Both are per-splat
+  // delayed, which is what makes the word ripple rather than snap.
+  float a = easeOutCubic(clamp01((uProgress - t0.w) / ${glf(ASSEMBLE_WINDOW)}));
+  float m = smoothstep01(clamp01((uProgress - ${glf(MORPH_START)} - t1.w) / ${glf(MORPH_WINDOW)}));
 
-  // ---- teardown ------------------------------------------------------------
-  // d places this splat's capture against the walk: > 0 it has been taken off,
-  // < 0 it is still buried under the one on screen, 0 it IS the one on screen.
-  // The two sides are asymmetric on purpose — see the SEQ_* block. One of them
-  // travels and the other never moves, so something is always at rest.
-  float d = (uLayer - t2.w) * uSequence;
-  float dep = max(d, 0.0);  // removal  (0 seated, 1 gone)
-  float arr = max(-d, 0.0); // burial   (1 buried, 0 resolved)
+  // Leaving. The mesh takes the machine over at the end of the morph, so the last
+  // thing the cloud does is get out of its way — one ramp, no travel: the two are
+  // already in the same place.
+  float lf = 1.0 - uSplatOut;
 
-  // REMOVAL, part one: EVAPORATION, keyed on this gaussian's own size.
-  // t3.x is the coarse-to-fine rank — 0 is the biggest gaussian in this capture,
-  // 1 the smallest — and in a 3DGS capture that ranks flat painted area against
-  // fine detail. Ordering the fade by it dissolves the part's SURFACES while its
-  // EDGES persist, so the shell opens into a tracery of its own seams and
-  // fasteners and the mechanism inside shows through. This is the whole argument
-  // for capturing the machine as gaussians: the primitive carries a frequency,
-  // and no mesh primitive does.
-  // uSequence zeroes the trigger for the single-capture fallback, where t3 holds
-  // a blast target and these numbers are world coordinates, not fractions.
-  float etrig = mix(mix(t3.x, t6.w, uEvapScan), t3.y, uGrain) * uSequence;
-  float eu = clamp01(dep / uEvapEnd);
-  float evap = clamp01((eu - etrig * uEvapStagger) / (1.0 - uEvapStagger));
-  float outA = 1.0 - evap;
-  // Deflate as it goes. A gaussian that fades without shrinking bloats into a
-  // soft cloud on the way out and the shell fogs over instead of opening; this
-  // keeps every surviving splat tight, so what is left reads as detail rather
-  // than as haze.
-  float shrink = 1.0 - uDeflate * evap;
+  vec3 center = mix(mix(t0.xyz, t1.xyz, a), t2.xyz, m);
 
-  // REMOVAL, part two: the LIFT, along one axis, up and out of frame (see uAxis).
-  // Deliberately late — by the time it starts the part is already porous, so it
-  // never drags an opaque mass across the layer it is revealing. A small
-  // top-first peel (t6.w) breaks the travel up. Written as a plain quadratic
-  // rather than pow(): the depth sort runs this per splat per frame on the CPU,
-  // where two multiplies are free and pow() is not.
-  float liftU = clamp01((dep - uLiftStart) / (1.0 - uLiftStart));
-  float peel = clamp01((liftU - t6.w * uPeel) / (1.0 - uPeel));
-  float go = peel * (${f(SEQ_LAUNCH)} + ${f(1 - SEQ_LAUNCH)} * peel);
-
-  // ARRIVAL — no travel, and no blur either. Every splat is at its true
-  // covariance from the moment it appears, so the layer underneath is sharp and
-  // readable the whole way in. What ramps is how many of its gaussians EXIST:
-  // biggest first, then finer, which is the order the capture was densified in
-  // during training. A mesh cannot be a third of itself; a cloud can.
-  float rev = 1.0 - arr;
-  float atrig = mix(mix(t3.x, t6.w, uDensScan), t3.y, uGrain) * uSequence;
-  float born = clamp01((rev - atrig * uReveal) / (1.0 - uReveal));
-  // x3 so a splat snaps to full opacity over the first third of its own window:
-  // it pops into existence rather than ghosting in, which is what keeps the
-  // arriving layer looking solid instead of translucent.
-  float inA = smoothstep01(clamp01(born * 3.0));
-
-  // Weight of this splat: the removal evaporates it, the arrival densifies it in,
-  // and the hand-over takes the last one out. Unlike the crossfade this replaces,
-  // the two sides do NOT have to sum to 1 — the leaving part exits the frame
-  // instead of dissolving inside it, so nothing double-exposes at centre screen
-  // and the arriving layer's curve is free.
-  float lf = outA * inA * (1.0 - uSplatOut);
-
-  // Nothing inflates any more. The leaving part shrinks (which is what lets the
-  // shell open rather than fog) and the arriving part is never anything but its
-  // true size, so peak fill through a handoff is now BELOW a held capture instead
-  // of several times above it.
-  float bloom = shrink;
-  // The leftover skeleton streaks along the one direction it is moving in.
-  float smear = 1.0 + uSmear * peel;
-  float stretch = sqrt(1.0 + (smear - 1.0) * (smear - 1.0));
-
-  // The ink solver below must see only the area changes that are SAMPLING
-  // decisions, never the ones that are the effect itself. The motion streak is a
-  // sampling decision: spreading a splat's light along its travel is what motion
-  // blur is, and it conserves. The DEFLATE is not. It is the evaporation, and a
-  // surface that is shrinking away is supposed to lose ink.
-  //
-  // Compensating it was measurably wrong, not just conceptually: at the deflate
-  // floor a splat covers ~0.16 of its seated area, so ink conservation handed it
-  // 6x the alpha and the dissolving shell came back as a field of hot mottled
-  // blobs — brighter mid-evaporation than it had been solid.
-  float area = stretch;
-
-  // Density LOD, applied where there is alpha headroom to pay it back — and
-  // ONLY there. Thinning uniformly and compensating everyone by 1/uDensity is
-  // the obvious version and it is wrong: a splat still near its seat is already
-  // near full opacity, so asking it for alpha > 1 just clamps in the blend, the
-  // ink is lost, and the machine dims through the middle of every handoff
-  // (measured at 22% down, with two thirds of splats saturating). Solving for
-  // the alpha each splat actually needs and never thinning past it costs
-  // nothing and holds brightness to ~0.05%. It also takes the fill off exactly
-  // where it is expensive: the splats with headroom are the dispersed ones,
-  // which are the ones covering the most screen.
-  float need = t3.w * lf / area; // alpha this splat wants at full density
-  float dens = max(uDensity, need);
-  if (dens < 1.0 && hash11(uint(i)) > dens) {
-    gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
-    return;
-  }
-  // Ink is conserved exactly: drawn with probability dens at alpha need/dens
-  // over area, the expected contribution is need*area — what it would have been
-  // seated, scaled by its weight. So thinning never changes what the frame looks
-  // like, only what it costs, whether it is a handoff or the wide diagram shot.
-  float energy = 1.0 / (area * dens);
-
-  vec3 base = mix(t0.xyz, t1.xyz, a);
-  vec3 formed = mix(base, t2.xyz, m);
-  // Single-capture fallback only: that cloud has no sequence to walk, so it
-  // still ends on the radial blast it always did. uSequence kills it outright —
-  // in sequence mode t3.xyz carries convergence data, not a position.
-  float blast =
-    easeInCubic(clamp01((uProgress - ${f(BLAST_START)} - t2.w) / ${f(1 - BLAST_START)}))
-    * (1.0 - uSequence);
-  vec3 center = mix(formed, t3.xyz, blast);
-  // The one motion in the whole walk: straight up and out while the layer is
-  // being removed. One axis, one direction, bounded by the frame — which is why
-  // nothing scatters across the page any more. t5.w is 0 outside sequence mode.
-  center += uAxis * (t5.w * go * uSequence);
-
-  // Cursor repulsion + idle simmer, text phase only (the photoreal model must
-  // not smear). GPU-only offsets are small enough not to upset the CPU depth
-  // sort. This is the animejs.com "poke the letters" interaction — a gentle
-  // bulge, not a crater (the word is only ~1.5 units tall).
-  float live = (1.0 - m) * (1.0 - blast) * a;
+  // Cursor repulsion + idle simmer, text phase only (the machine must not smear).
+  // GPU-only offsets are small enough not to upset the CPU depth sort. This is the
+  // animejs.com "poke the letters" interaction — a gentle bulge, not a crater (the
+  // word is only ~1.5 units tall).
+  float live = (1.0 - m) * a;
   vec2 dm = center.xy - uMouse;
   float dl = length(dm);
   center.xy += (dm / max(dl, 0.2)) * exp(-dl * dl * 3.0) * uRepel * live;
   center.x += sin(uTime * 1.1 + iIndex * 0.37) * 0.014 * live;
   center.y += cos(uTime * 1.4 + iIndex * 0.53) * 0.014 * live;
 
-  // In-flight splats stay faint dust and brighten as they seat into the word;
-  // the explosion dissolves to black instead of ending on a noise field.
+  // In-flight particles stay faint dust and brighten as they seat into the word.
   float dust = mix(0.05, 1.0, a);
-  float fade = 1.0 - uBlastFade * blast;
 
-  vec3 modelCol = mix(t5.rgb, gradeMono(t5.rgb), uGrade);
-  // Acid on the gaussians that are mid-evaporation. Because the order is by size
-  // with a top-down bias, the ones caught in the act form a front sweeping down
-  // the part — the shell is visibly being taken apart along a line rather than
-  // uniformly. It also covers the colour step between two captures that came out
-  // of two separate trainings.
-  modelCol = mix(modelCol, vec3(0.776, 1.0, 0.0), uTint * evap * (1.0 - evap) * 4.0);
-  // t4.w: per-splat text alpha factor — the finely-sampled lockup band packs
+  // t4.rgb reaches here already shaded, tone-mapped and sRGB-encoded — see
+  // sampleCadSurface — so nothing further is done to it. The whole premise of the
+  // handover is that this is the SAME picture the mesh draws, and any grade
+  // applied on one side of it and not the other is the cross-fade it exists to
+  // avoid.
+  // t3.w: per-splat text alpha factor — the finely-sampled lockup band packs
   // ~2x the splat density and pays it back here so strokes don't bloom fat
   vColor = vec4(
-    mix(t4.rgb, modelCol, m),
-    mix(uTextAlpha * t4.w * dust, t3.w, m) * fade * lf * mix(1.0, energy, uSequence)
+    mix(t3.rgb, t4.rgb, m),
+    mix(uTextAlpha * t3.w * dust, t2.w, m) * lf
   );
 
-  // Below one 8-bit step this splat cannot tint a pixel, but a de-converged
-  // gaussian is at its LARGEST exactly when it is faintest — so the tail of
-  // every handoff is where the invisible fill would otherwise pile up.
+  // Below one 8-bit step this particle cannot tint a pixel, and the tail of the
+  // handover is a whole cloud sitting under that threshold at once. Rejecting
+  // here, before the projection, is what stops it being rasterised for nothing.
   if (vColor.a < 0.005) {
     gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
     return;
   }
 
-  // text particles are isotropic dots that bloom into the real gaussian
-  vec3 scale = mix(vec3(uTextDot), t6.xyz, m) * bloom;
+  // Both ends of the morph are ISOTROPIC — a text dot, and a point sampled off the
+  // machine's surface at the cloud's mean spacing — so one radius describes the
+  // whole cloud's covariance and the rotation that used to orient a captured
+  // gaussian's ellipsoid is gone with the captures. sigma = s^2 I, which is what
+  // collapses the projection below to a scalar times T T^T.
+  float s = mix(uTextDot, t4.w, m);
 
   vec4 cam = modelViewMatrix * vec4(center, 1.0);
   vec4 clip = projectionMatrix * cam;
@@ -2498,24 +2801,6 @@ void main() {
     return;
   }
 
-  mat3 R = quatToMat(normalize(t7));
-  mat3 S = mat3(scale.x, 0.0, 0.0, 0.0, scale.y, 0.0, 0.0, 0.0, scale.z);
-  mat3 Mx = R * S;
-  mat3 sigma = Mx * transpose(Mx); // 3D covariance = R S S^T R^T
-
-  // Motion smear as a rank-1 term on that covariance: the gaussian stretches
-  // along the direction it is travelling, so a part being removed reads as
-  // streaks pulling up off the machine rather than dots sliding. This is the
-  // whole argument for splatting the removal instead of cross-fading it — the
-  // shape of each primitive carries the motion, and a sprite has no shape to
-  // give. The direction is uAxis, because that is now the only direction
-  // anything travels; the length is tied to the splat's own size, so it is
-  // always a streak and never a smudge across the frame.
-  if (smear > 1.0) {
-    float ax = max(max(scale.x, scale.y), scale.z) * (smear - 1.0);
-    sigma += (ax * ax) * outerProduct(uAxis, uAxis);
-  }
-
   // Jacobian of the perspective projection at cam (column-major constructor).
   // Its overall sign cancels in T*sigma*T^T, so cam.z < 0 is fine.
   mat3 J = mat3(
@@ -2524,9 +2809,9 @@ void main() {
     -(uFocal.x * cam.x) / (cam.z * cam.z), -(uFocal.y * cam.y) / (cam.z * cam.z), 0.0
   );
   mat3 T = J * mat3(modelViewMatrix);
-  mat3 cov = T * sigma * transpose(T);
+  mat3 cov = (s * s) * (T * transpose(T));
 
-  // dilate so sub-pixel gaussians stay visible instead of aliasing away
+  // dilate so sub-pixel particles stay visible instead of aliasing away
   cov[0][0] += 0.3;
   cov[1][1] += 0.3;
 
@@ -2571,10 +2856,10 @@ void main() {
 `;
 
 // Counting-sort resolution. Every frame pays a full prefix-sum over this,
-// whatever the splat count — at 65536 that pass alone cost more than sorting a
-// held capture's ~45k splats. 16384 levels of depth is far past what alpha
-// blending can show: the splats that land in one bucket are within a fraction
-// of a millimetre of each other.
+// whatever the particle count — at 65536 that pass alone cost more than sorting
+// the ~45k particles it was measured against. 16384 levels of depth is far past
+// what alpha blending can show: the particles that land in one bucket are within
+// a fraction of a millimetre of each other.
 const SORT_BUCKETS = 16384;
 
 // Counting sort on view-space depth. Back-to-front == ascending z, since three's
@@ -2587,67 +2872,31 @@ function depthSort(
   depths: Float32Array,
   buckets: Uint16Array,
   counts: Uint32Array,
-  start: number, // first splat of the live span. In sequence mode this is the
-  end: number, //   active capture (plus its handoff neighbour, which is
-  stride: number, //  adjacent in the file); otherwise the whole cloud.
-  layerPos: number, // the walk position, mirroring the shader's uLayer
-  axis: THREE.Vector3 // the shader's uAxis: screen-up, in object space
+  stride: number
 ): number {
   const e = mv.elements;
   let dmin = Infinity;
   let dmax = -Infinity;
-  const { scatterA, textHome, modelHome, scatterB } = data;
+  const { count, scatterA, textHome, modelHome, delayForm, delayMorph } = data;
 
-  // Past the last splat's morph, every splat sits on its capture and only the
-  // handoff moves it — so the three-stage lerp and its three easing curves can
-  // go. That is the entire sequence beat, which is most of the page, and it
-  // cuts the per-splat sort cost by roughly three quarters.
-  const seated = data.layers !== null && p >= SEQ_START;
-
-  // Thinning is a stride, not a shorter span: a prefix would drop the whole
-  // second half of a handoff, and inside one capture it would carve away a
-  // chunk rather than thinning it evenly.
+  // Thinning is a stride, not a shorter span: a prefix would carve a chunk out of
+  // the cloud rather than thinning it evenly, and the cloud is one set — the
+  // wordmark's particles, sampled on the machine's own surface — so the whole of
+  // it is always in play.
   let n = 0;
-  for (let k = start; k < end; k += stride, n++) {
+  for (let k = 0; k < count; k += stride, n++) {
     const i3 = k * 3;
-    let x: number;
-    let y: number;
-    let z: number;
+    // The same two lerps the vertex shader runs, on the same two easing curves.
+    // If these drift the cloud composites in the wrong order exactly where it
+    // overlaps itself most, which is the middle of the morph.
+    const a = easeOutCubic(clamp01((p - delayForm[k]) / ASSEMBLE_WINDOW));
+    const m = smoothstep(clamp01((p - MORPH_START - delayMorph[k]) / MORPH_WINDOW));
+    const x = lerp(lerp(scatterA[i3], textHome[i3], a), modelHome[i3], m);
+    const y = lerp(lerp(scatterA[i3 + 1], textHome[i3 + 1], a), modelHome[i3 + 1], m);
+    const z = lerp(lerp(scatterA[i3 + 2], textHome[i3 + 2], a), modelHome[i3 + 2], m);
 
-    if (seated) {
-      // Same arithmetic as the vertex shader's teardown block — if these two
-      // drift, the captures interleave wrongly exactly where they overlap most.
-      // Far cheaper than the version it replaces: nothing moves off the axis, so
-      // x and z are simply the splat's seat, and a layer that is arriving (or
-      // just sitting there) does not move at all.
-      const sd = layerPos - (data.delayBlast[k] | 0);
-      let axial = 0;
-      if (sd > SEQ_LIFT_START) {
-        // The lift only — evaporation and deflation move nothing, so the sort
-        // does not care about them. Mirrors the shader's REMOVAL part two.
-        const liftU = clamp01((sd - SEQ_LIFT_START) / (1 - SEQ_LIFT_START));
-        const peel = clamp01((liftU - data.phase[k] * SEQ_PEEL) / (1 - SEQ_PEEL));
-        axial = data.exit[k] * peel * (SEQ_LAUNCH + (1 - SEQ_LAUNCH) * peel);
-      }
-      x = modelHome[i3] + axis.x * axial;
-      y = modelHome[i3 + 1] + axis.y * axial;
-      z = modelHome[i3 + 2] + axis.z * axial;
-    } else {
-      const a = easeOutCubic(clamp01((p - data.delayForm[k]) / ASSEMBLE_WINDOW));
-      const m = smoothstep(
-        clamp01((p - MORPH_START - data.delayMorph[k]) / (MORPH_END - MORPH_START))
-      );
-      const b = data.layers
-        ? 0 // pre-walk: the sequence has not started dispersing anything yet
-        : easeInCubic(clamp01((p - BLAST_START - data.delayBlast[k]) / (1 - BLAST_START)));
-
-      x = lerp(lerp(lerp(scatterA[i3], textHome[i3], a), modelHome[i3], m), scatterB[i3], b);
-      y = lerp(lerp(lerp(scatterA[i3 + 1], textHome[i3 + 1], a), modelHome[i3 + 1], m), scatterB[i3 + 1], b);
-      z = lerp(lerp(lerp(scatterA[i3 + 2], textHome[i3 + 2], a), modelHome[i3 + 2], m), scatterB[i3 + 2], b);
-    }
-
-    // view-space z only — the sort key. Keyed by position in the span, not by
-    // splat index, so the scratch stays compact whatever the span is.
+    // view-space z only — the sort key. Keyed by position in the strided walk,
+    // not by particle index, so the scratch stays compact at every stride.
     const d = e[2] * x + e[6] * y + e[10] * z + e[14];
     depths[n] = d;
     if (d < dmin) dmin = d;
@@ -2667,7 +2916,7 @@ function depthSort(
     counts[i] = sum;
     sum += c;
   }
-  for (let j = 0; j < n; j++) order[counts[buckets[j]]++] = start + j * stride;
+  for (let j = 0; j < n; j++) order[counts[buckets[j]]++] = j * stride;
   return n;
 }
 
@@ -2679,6 +2928,7 @@ function SplatCloud({
   drive,
   idle,
   onReady,
+  onFailed,
   onLayer,
   onQuality,
   selectRef,
@@ -2687,6 +2937,7 @@ function SplatCloud({
   onSelect,
   onInspectable,
   onDiagram,
+  onSolid,
 }: {
   text: string;
   progressRef: React.RefObject<number>;
@@ -2701,6 +2952,10 @@ function SplatCloud({
   // decides it. Written here, read by DiagramMsaa — see the Idle type.
   idle: React.RefObject<Idle>;
   onReady?: () => void;
+  // The geometry did not arrive and is not going to. Distinct from "not ready
+  // yet", because the two want opposite things on screen: one is a shimmer, the
+  // other is the hero copy the shimmer is standing in front of.
+  onFailed?: () => void;
   // Inspection, in the same shape as the pacing above: the SCENE finds what the
   // pointer is on (it owns the boxes and the matrices), the HOST owns what is
   // selected (the layer rail has to be able to select too, and a keyboard has to
@@ -2719,7 +2974,10 @@ function SplatCloud({
   // Whether the CAD diagram owns the frame, so the host can hand it the render
   // scale the splat budget was holding back. See PIXEL_BUDGET_DIAGRAM.
   onDiagram?: (v: boolean) => void;
-  // Which capture is on screen, reported only when it changes. The caption is
+  // Whether the frame is solid geometry with no particle pass over it, which
+  // is what decides multisampling. See the note beside ins.solid.
+  onSolid?: (v: boolean) => void;
+  // Which stage is on screen, reported only when it changes. The caption is
   // driven from this rather than recomputed from scroll: the scene runs on the
   // spring-smoothed progress, so deriving the index a second time from raw
   // scroll would drift the text off the model it is labelling.
@@ -2732,6 +2990,11 @@ function SplatCloud({
   const layerSeen = useRef(-1);
   const axisRef = useRef(new THREE.Vector3(0, 1, 0));
   const invRef = useRef(new THREE.Quaternion());
+  // The camera's view-projection, built once a frame and copied into all eight
+  // layer materials — see the note where it is filled.
+  const viewProjRef = useRef(new THREE.Matrix4());
+  // Per-beat framing scale, rebuilt every frame — see the walk block in useFrame.
+  const zoomsRef = useRef(new Float64Array(0));
   const groupRef = useRef<THREE.Group>(null);
   const meshRef = useRef<THREE.Mesh>(null);
   const intro = useRef(0); // time-driven assembly, plays once after the data lands
@@ -2771,18 +3034,34 @@ function SplatCloud({
     },
     []
   );
-  // The program is the other half and does not need a draw at all: compile()
+  // The programs are the other half and do not need a draw at all: compile()
   // walks the scene with traverse(), not traverseVisible(), so it reaches the
   // diagram while it is still hidden, and compileAsync hands the link to
   // KHR_parallel_shader_compile where the driver has it.
+  //
+  // BOTH variants, which needs the swap below: compile() only sees the material
+  // each mesh is actually carrying, and the meshes carry the solid one until the
+  // first layer starts dissolving 210vh down the page. Left to itself the peel
+  // program would link on that frame — in the middle of the beat the whole hero
+  // is built around, which is the one place a link stall must not land. The
+  // traverse inside compileAsync is synchronous (only the link CHECK is
+  // deferred), so restoring the materials on the next line is safe.
   useEffect(() => {
     if (!cad) return;
-    try {
-      if (typeof gl.compileAsync === 'function') void gl.compileAsync(scene, camera);
+    const link = () => {
+      if (typeof gl.compileAsync === 'function') void gl.compileAsync(scene, camera).catch(() => {});
       else gl.compile(scene, camera);
+    };
+    try {
+      for (const c of cad) for (const im of c.meshes) im.material = c.peelMaterial;
+      link();
+      for (const c of cad) for (const im of c.meshes) im.material = c.material;
+      link();
     } catch {
       // A warm-up that cannot run is not a failure — it costs the frame it was
-      // meant to save and nothing else.
+      // meant to save and nothing else. Put the materials back regardless: a
+      // layer left on the peel variant would draw with depthWrite off.
+      for (const c of cad) for (const im of c.meshes) im.material = c.material;
     }
   }, [cad, gl, scene, camera]);
 
@@ -2795,6 +3074,11 @@ function SplatCloud({
     focus: 0, // 0..1 isolation blend, damped toward "is something selected"
     live: false, // is the diagram accepting a pointer at this scroll position
     diagram: false, // is the CAD the only thing drawing, i.e. can it have the pixels
+    // Whether the frame is SOLID GEOMETRY and nothing else. Separate from
+    // `diagram` on purpose: that one is about the closing beat's pixel budget and
+    // deliberately switches late, while this is about anti-aliasing and has to be
+    // true for every frame that draws a triangle — which is now most of the page.
+    solid: false,
     yaw: 0, // user orbit, applied on top of the scripted rotation
     pitch: 0,
     yawTo: 0,
@@ -2976,16 +3260,37 @@ function SplatCloud({
     };
   }, [gl, onSelect, selectRef]);
 
+  // One asset, and everything is derived from it.
+  //
+  // This effect used to fetch 9.9 MB of gaussian captures and the diagram was
+  // loaded afterwards, on an idle callback, precisely because the two together
+  // were 17 MB. There is now nothing to race: the CAD is the only geometry the
+  // hero has, the word's particles are sampled off it, and the whole hero is
+  // 7.27 MB — 3.94 on the wire, since the route that serves it now sets a
+  // Content-Encoding (see src/app/hero-model/[file]/route.ts; it was going over
+  // uncompressed, which is 46% of the transfer for nothing).
   useEffect(() => {
     let cancelled = false;
-    const small = typeof window !== 'undefined' && window.innerWidth < 820;
-    const limit = small ? MAX_SPLATS_MOBILE : MAX_SPLATS_DESKTOP;
-    // Sequence budgets are per capture, not per file: only one capture is on
-    // screen, so a phone can hold every one of them at a workable density
-    // instead of thinning all nine into the old whole-cloud cap.
-    const perLayer = small ? PER_LAYER_MOBILE : Infinity;
+    // Stops a 7 MB transfer when the visitor leaves the page rather than letting
+    // it run to completion against a flag that only suppresses the setState.
+    const ac = new AbortController();
 
     (async () => {
+      // THE FETCH GOES FIRST, and the fonts are awaited after it. Nothing about
+      // the request needs a font — they are consumed by sampleLockup, three steps
+      // downstream, after the parse and after the idle callback — and both hanzi
+      // faces are declared `preload: false`, so asking for them costs a Google
+      // Fonts CSS round-trip plus a unicode-range subset fetch. Awaiting that in
+      // front of the largest asset on the site put a full RTT of dead air on the
+      // one thing the hero cannot start without.
+      const wire = Promise.all([
+        fetch(CAD_URL, { signal: ac.signal }),
+        fetch(CAD_INDEX_URL, { signal: ac.signal }),
+      ]);
+      // Nothing may throw between here and the await below, or `wire` is an
+      // unhandled rejection.
+      wire.catch(() => {});
+
       // The word is rasterised in the display faces — request them explicitly
       // (fonts.ready alone only covers faces already used in the DOM), using
       // the resolved next/font family names and the actual glyphs so the
@@ -3002,102 +3307,59 @@ function SplatCloud({
       } catch {
         /* older browsers: sample whatever is available */
       }
-      // The capture sequence first, so the hero can walk the machine apart. Both
-      // halves must land — without the index there is no way to tell the
-      // captures apart, so fall through rather than render nine on top of each
-      // other. Every capture keeps its full quality; only one is drawn at a time,
-      // so the per-frame cost is one capture however many are in the file.
+
+      // Both halves must land: the vertex block is meaningless without the sidecar
+      // that says which bytes are which shape, so there is no partial success to
+      // fall back to.
       try {
-        const [rc, ri] = await Promise.all([fetch(LAYERS_URL), fetch(LAYERS_INDEX_URL)]);
-        if (rc.ok && ri.ok) {
-          const [ab, idx] = await Promise.all([rc.arrayBuffer(), ri.arrayBuffer()]);
-          const model = parseLayerCloud(ab, idx, perLayer);
-          if (model && !cancelled) {
-            setSrc(model);
-            return;
-          }
-        }
+        const [rc, ri] = await wire;
+        if (!rc.ok || !ri.ok) throw new Error(`models: ${rc.status}/${ri.status}`);
+        const [ab, idx] = await Promise.all([rc.arrayBuffer(), ri.arrayBuffer()]);
+        const parsed = parseCadLayers(ab, idx);
+        if (!parsed) throw new Error('models: parse failed');
+        if (!cancelled) setCad(parsed);
       } catch {
-        /* fall through to the single capture */
-      }
-      // real gaussians first; fall back to the bare point cloud (STL path)
-      try {
-        const r = await fetch(SPLAT_URL);
-        if (r.ok) {
-          const ab = await r.arrayBuffer();
-          if (!cancelled) setSrc(parseSplats(ab, limit));
-          return;
-        }
-      } catch {
-        /* fall through */
-      }
-      try {
-        const r = await fetch(POINTS_URL);
-        if (r.ok) {
-          const ab = await r.arrayBuffer();
-          if (!cancelled) setSrc(synthesiseSplats(ab, limit));
-        }
-      } catch {
-        /* nothing to render */
+        // Say so, rather than leaving the page on a shimmer forever. `ready` is
+        // what un-hides the hero copy, and it is driven off the sampled data — so
+        // a dropped transfer used to leave 940vh of near-black with a pulsing
+        // rule and the word LOADING on a manufacturer's homepage: no company
+        // name, no tagline, nothing. There is no retry here on purpose; a second
+        // 7 MB attempt on a connection that just dropped one is more likely to
+        // hold the page hostage twice than to succeed. See `failed`.
+        if (!cancelled) onFailed?.();
       }
     })();
 
     return () => {
       cancelled = true;
+      ac.abort();
     };
   }, []);
 
-  // The diagram, fetched AFTER the cloud instead of alongside it.
-  //
-  // This used to be a bare `[]` effect that fired on mount, so the browser pulled
-  // both files at once and they split the connection. That was defensible while
-  // the diagram was 3 MB against the cloud's 10; instancing then bought it 2.7x
-  // the geometry and it became 7.3 MB against 9.9 — nearly half of a 17 MB first
-  // paint, spent on a beat that does not appear until the last 9% of an 820vh
-  // page. Racing it only delays the beat the visitor actually sees first.
-  //
-  // So: wait for `src`, then wait for the main thread to go idle. Gating on `src`
-  // is also the correct dependency rather than a convenient one — the diagram is
-  // handed to the walk, and if the cloud never loads there is no walk to hand it
-  // to and nothing should be downloaded at all.
+  // The particles, derived from the geometry rather than fetched beside it. Runs
+  // once the diagram lands, off the main thread's next idle slot: sampling ~150k
+  // points across 400k triangles is a few milliseconds, but those few milliseconds
+  // would otherwise land on the same frame that uploads the CAD buffers.
   useEffect(() => {
-    if (!src) return;
+    if (!cad) return;
     let cancelled = false;
+    const small = typeof window !== 'undefined' && window.innerWidth < 820;
+    const limit = small ? MAX_SPLATS_MOBILE : MAX_SPLATS_DESKTOP;
     const run = () => {
       if (cancelled) return;
-      (async () => {
-        try {
-          const [rc, ri] = await Promise.all([fetch(CAD_URL), fetch(CAD_INDEX_URL)]);
-          if (!rc.ok || !ri.ok) return;
-          const [ab, idx] = await Promise.all([rc.arrayBuffer(), ri.arrayBuffer()]);
-          const parsed = parseCadLayers(ab, idx);
-          if (parsed && !cancelled) setCad(parsed);
-        } catch {
-          /* no diagram; the walk still ends cleanly */
-        }
-      })();
+      const sampled = sampleCadSurface(cad, limit);
+      if (sampled && !cancelled) setSrc(sampled);
     };
-    // The idle window is a nicety, not the mechanism — the ordering above is what
-    // matters. It carries a timeout because the intro assembly is running about
-    // now and a busy main thread must not starve the fetch outright. Even the
-    // timeout path leaves the 468vh walk plus the table beat as lead time.
     const w = window as Window & {
       requestIdleCallback?: (cb: () => void, o?: { timeout: number }) => number;
-      cancelIdleCallback?: (h: number) => void;
     };
-    if (w.requestIdleCallback) {
-      const h = w.requestIdleCallback(run, { timeout: 1500 });
-      return () => {
-        cancelled = true;
-        w.cancelIdleCallback?.(h);
-      };
-    }
-    const t = window.setTimeout(run, 200); // Safari < 16.4
+    // Safari below 16.4 has no requestIdleCallback.
+    if (typeof w.requestIdleCallback === 'function') w.requestIdleCallback(run, { timeout: 400 });
+    else setTimeout(run, 0);
     return () => {
       cancelled = true;
-      window.clearTimeout(t);
     };
-  }, [src]);
+  }, [cad]);
 
   useEffect(() => {
     if (!cad) return;
@@ -3105,6 +3367,7 @@ function SplatCloud({
       for (const c of cad) {
         for (const g of c.geometries) g.dispose();
         c.material.dispose();
+        c.peelMaterial.dispose();
       }
     };
   }, [cad]);
@@ -3139,11 +3402,9 @@ function SplatCloud({
       // the layer.
       const hy = (r.box.max.y - r.box.min.y) / 2;
       const fitR = Math.hypot(r.planR, hy);
-      // Measured up the SCREEN, which is the axis the seats are laid out on. A
-      // part contributes its own height foreshortened by the tilt plus the share
-      // of its width the tilt swings into vertical — a flat disc like the
-      // turntable is almost all of the second term.
-      const half = ((r.maxY - r.minY) / 2) * cp + r.radius * sp;
+      // Measured up the SCREEN, which is the axis the seats are laid out on — a
+      // flat disc like the turntable is almost entirely the plan term.
+      const half = screenHalfH((r.maxY - r.minY) / 2, r.radius, cp, sp);
       const mid = r.centreY * cp + r.seatY;
       per.push({ fitR: Math.max(0.001, fitR) });
       lo = Math.min(lo, mid - half);
@@ -3157,6 +3418,71 @@ function SplatCloud({
       radius: Math.max(0.001, radius),
       per,
     };
+  }, [cad]);
+
+  // The teardown, measured off the same geometry that draws it.
+  //
+  // Beat k frames layers k..n-1 SEATED — the machine with its first k layers
+  // already taken off. That is the whole difference between this walk and the one
+  // it replaces: nine captures each trained on a part in isolation could only ever
+  // be shown one after another, a catalogue of subassemblies, and the reveal had to
+  // be implied. Here the layer that comes off was genuinely on top of the one
+  // underneath, in the same world frame, so removing it reveals what was actually
+  // there.
+  //
+  // What each beat needs from the geometry is TWO half-extents, not one radius,
+  // because the frame's two constraints are not the same measurement. Horizontally
+  // the subject is bounded by its plan half-extent. Vertically it is bounded by how
+  // tall it stands ON SCREEN — see screenHalfH, which is where that measurement and
+  // the reason it is not max(planHalf, yHalf) both live.
+  const walk = useMemo(() => {
+    if (!cad || cad.length < 2) return null;
+    if (process.env.NODE_ENV !== 'production' && cad.length !== WALK_LAYERS) {
+      // The pacing constants quantise the walk's detents to 1/WALK_LAYERS while
+      // this maps scroll onto cad.length. Disagreeing does not desync the scene —
+      // it parks every rest half way through a removal.
+      console.warn(
+        `ScrollScene: cad-layers-index.bin carries ${cad.length} layers but WALK_LAYERS is ${WALK_LAYERS}; the walk will rest mid-removal.`
+      );
+    }
+    const n = cad.length;
+    const cp = Math.cos(MODEL_PITCH);
+    const sp = Math.sin(MODEL_PITCH);
+    const out: {
+      centreY: number;
+      radius: number;
+      planHalf: number;
+      halfScreen: number;
+    }[] = [];
+    for (let k = 0; k < n; k++) {
+      let loY = Infinity;
+      let hiY = -Infinity;
+      let loX = Infinity;
+      let hiX = -Infinity;
+      for (let i = k; i < n; i++) {
+        const b = cad[i].box;
+        loY = Math.min(loY, b.min.y);
+        hiY = Math.max(hiY, b.max.y);
+        // Plan extent, taken over both horizontal axes: the machine is square in
+        // plan, and the yaw drift means whichever of the two is wider can be the
+        // one facing the camera on any given frame.
+        loX = Math.min(loX, b.min.x, b.min.z);
+        hiX = Math.max(hiX, b.max.x, b.max.z);
+      }
+      const planHalf = Math.max(0.001, (hiX - loX) / 2);
+      const yHalf = Math.max(0.001, (hiY - loY) / 2);
+      out.push({
+        centreY: (loY + hiY) / 2,
+        // The larger of the two, which is what the caption's horizontal
+        // reservation wants: it errs wide, and the finale's own `radius` is
+        // measured the same way, so the two blend against each other honestly.
+        radius: Math.max(planHalf, yHalf),
+        planHalf,
+        // Up the screen, the same way the finale measures its stack.
+        halfScreen: screenHalfH(yHalf, planHalf, cp, sp),
+      });
+    }
+    return out;
   }, [cad]);
 
   useEffect(() => {
@@ -3200,27 +3526,7 @@ function SplatCloud({
         uTextDot: { value: 0.005 },
         uTextAlpha: { value: 0.82 },
         uMaxAxis: { value: maxAxis0.current },
-        // 0 => the capture renders in its true 3DGS colours; flip to
-        // src.photoreal ? 1 : 0 to re-engage the silver-gelatin mono grade
-        uGrade: { value: 0 },
-        // A sequence never blasts — the captures replace each other in place.
-        uBlastFade: { value: data.layers ? 0 : 0.9 },
-        uSequence: { value: data.layers ? 1 : 0 },
-        uLayer: { value: 0 },
-        uEvapEnd: { value: SEQ_EVAP_END },
-        uEvapStagger: { value: SEQ_EVAP_STAGGER },
-        uEvapScan: { value: SEQ_EVAP_SCAN },
-        uDeflate: { value: SEQ_DEFLATE },
-        uLiftStart: { value: SEQ_LIFT_START },
-        uPeel: { value: SEQ_PEEL },
-        uSmear: { value: SEQ_SMEAR },
-        uReveal: { value: SEQ_REVEAL },
-        uDensScan: { value: SEQ_DENS_SCAN },
-        uGrain: { value: SEQ_GRAIN },
-        uTint: { value: SEQ_TINT },
         uSplatOut: { value: 0 },
-        uAxis: { value: new THREE.Vector3(0, 1, 0) },
-        uDensity: { value: 1 },
         uMouse: { value: new THREE.Vector2(99, 99) },
         uTime: { value: 0 },
         uRepel: { value: 0.38 },
@@ -3305,7 +3611,7 @@ function SplatCloud({
     }
 
     // Scroll-driven 3D rotation (deterministic + reversible): no rotation while
-    // the word is readable, then the capture swings up into a 3/4 view from
+    // the word is readable, then the machine swings up into a 3/4 view from
     // above through the morph and drifts as it holds and explodes. Must be a
     // pure function of progress — an accumulator left the word mirrored after
     // scrolling back up.
@@ -3318,7 +3624,22 @@ function SplatCloud({
     const spinModel = clamp01((p - MORPH_END) / (FINALE_END - MORPH_END));
     // How far into the closing diagram we are. Drives the framing, the tilt and
     // the wide-shot LOD; the per-layer landing is staggered off it below.
-    const fe = data.layers ? smoothstep(clamp01((p - SEQ_END) / (FINALE_END - SEQ_END))) : 0;
+    const fe = cad ? smoothstep(clamp01((p - WALK_END) / (FINALE_END - WALK_END))) : 0;
+    // The handover from the word's dust to the machine's own geometry. One ramp
+    // drives both sides of it: the mesh fades up on `appear` and the particles
+    // fade out on the same number, so the two can never both be missing.
+    const appear = cad
+      ? smoothstep(clamp01((p - SOLID_START) / (SOLID_END - SOLID_START)))
+      : 0;
+    material.uniforms.uSplatOut.value = appear;
+    // The table beat, as a ramp: 0 the moment the machine finishes assembling
+    // itself out of the word, 1 by the time the first layer is due to come off.
+    // TWO things ride it and they used to compute it separately, three lines
+    // apart — the caption column's horizontal reservation (the copy arrives at the
+    // walk, so the model has to have finished moving aside before it does) and the
+    // walk's own emphasis (the assembled machine gets one beat of being nothing but
+    // itself before anything is pointed at).
+    const tableIn = smoothstep(clamp01((p - MORPH_END) / TABLE_SPAN));
 
     // ------------------------------------------------------------ inspection
     const ins = inspect.current;
@@ -3334,23 +3655,48 @@ function SplatCloud({
       if (!pickable && (selectRef.current ?? -1) >= 0) onSelect?.(-1);
     }
     // The render scale the diagram gets is a different number from the one the
-    // splats get, and switching it reallocates the drawing buffer — so the two
-    // thresholds are deliberately far apart. On at the handover, where the splat
-    // mesh stops being drawn at all; off only once the walk is properly back.
-    // Scrubbing across a single threshold would otherwise resize the canvas on
-    // every frame of the scrub.
+    // particle cloud gets, and switching it reallocates the drawing buffer — so
+    // the two thresholds are deliberately far apart, and both sit deep inside the
+    // finale, where the cloud has not been drawn for most of a page. Scrubbing
+    // across a single threshold would otherwise resize the canvas on every frame
+    // of the scrub.
+    // Multisampling, on the other hand, follows the GEOMETRY and not the beat.
     //
-    // Between the two thresholds the splats are drawn at the diagram's render
-    // scale, which leaves uMaxAxis — a cap in BACKING-STORE pixels, so it rides
-    // the governor's rung but not this — clamping each gaussian's extent a little
-    // tighter than it was calibrated for. It is deliberately left alone: that
-    // window is the tail of the cross-dissolve, where uSplatOut has already taken
-    // the whole cloud most of the way to zero alpha.
+    // It used to be gated on `diagram` above, which is why the walk aliased: 468vh
+    // of perforated tracks, ring gears and the lip of every disc, drawn with no
+    // anti-aliasing of any kind, because the flag it was keyed to does not come up
+    // until the last 9% of the page. That gating made sense when everything before
+    // the diagram was soft gaussians — soft gaussians genuinely cannot alias, and
+    // multisampling hundreds of thousands of alpha-blended quads is the one thing
+    // the canvas flag must never be allowed to do. It survived the move to meshes
+    // unexamined, and the reason it was there went with the captures.
+    //
+    // So: on for every frame where the machine is drawn and the particles are not.
+    // The threshold is exactly `splatsGone` — the same number that stops drawing
+    // the cloud — so the multisampled pass and the alpha-blended pass can never
+    // overlap by construction, which is the whole of the original argument. The
+    // hysteresis band is wide because switching reallocates the renderbuffer.
     if (cad) {
+      const solid = ins.solid ? appear > 0.9 : appear >= 0.999;
+      if (solid !== ins.solid) {
+        ins.solid = solid;
+        onSolid?.(solid);
+      }
       const owns = ins.diagram ? fe > 0.15 : fe >= FINALE_HANDOVER;
       if (owns !== ins.diagram) {
         ins.diagram = owns;
         onDiagram?.(owns);
+        // A probe measured on one pass is not evidence about another, and this is
+        // the page's one real change of pass: the render scale jumps to the
+        // diagram's own budget and 4x multisampling arrives with it. A device
+        // that learned "resolution is not my problem" while scrubbing the walk
+        // would otherwise carry that verdict into the single most expensive beat
+        // there is. Cheap because it happens twice a page at most.
+        const gv = gov.current;
+        gv.floor = GOV_MAX_LEVEL;
+        gv.probe = 0;
+        gv.bad = 0;
+        gv.good = 0;
       }
     }
     if (!pickable && ins.hot >= 0) {
@@ -3413,59 +3759,102 @@ function SplatCloud({
     // near-side-on read, and keeps turning.
     grp.rotation.x = lerp(MODEL_PITCH * rf, FINALE_PITCH, fe) + ins.pitch * foc;
     grp.rotation.y = MODEL_YAW * rf + spinModel * MODEL_TURN + fe * FINALE_TURN + ins.yaw * foc;
+    // The pitch, resolved once. Everything that has to project an OBJECT-space
+    // height onto the screen goes through this pair, and it was three separate
+    // trig calls on the same angle: object +y lands cos(pitch) up the screen and
+    // sin(pitch) toward the camera.
+    const cosPitch = Math.cos(grp.rotation.x);
+    const sinPitch = Math.sin(grp.rotation.x);
 
     // Screen-up, expressed in the group's own space — the direction a part
-    // travels when it is removed, and the one the explode seats are stacked on.
+    // travels when it is removed, and the one the explode seats are stacked on. It
+    // has to be screen-relative and cannot be the machine's own +Y, however much
+    // the CAD explode says otherwise: the group is pitched 43 degrees to look down
+    // at the playfield, so object +Y points up AND two thirds of the way toward the
+    // camera, and a part sent along it does not leave the frame — it flies through
+    // the lens, filling the screen with a blurred close-up of its own underside.
+    // Every exploded-view drawing ever made separates parts up the page for the
+    // same reason.
+    //
     // Derived from the live rotation rather than baked, so it stays vertical
-    // through the pitch ramp and the drifting yaw. Reused scratch: this runs
-    // every frame and is handed straight to both the shader and the sort.
+    // through the pitch ramp and the drifting yaw. Reused scratch: this runs every
+    // frame and both the removal travel and the landing flight read it.
     const axis = axisRef.current;
     axis.set(0, 1, 0).applyQuaternion(invRef.current.copy(grp.quaternion).invert());
-    material.uniforms.uAxis.value.copy(axis);
 
-    // Walk the capture sequence: 00 (the assembled machine, which is what the
-    // word became) and then each subassembly as it is taken off. `pos` is
-    // fractional — its integer part is the capture on screen and the remainder
-    // is how far through its removal the walk has got. Live span is the two
-    // captures either side of it, which are adjacent in the file, so it stays
-    // one contiguous range.
-    const seq = data.layers;
-    let spanStart = 0;
-    let spanEnd = data.count;
-    let fit = 1 - (1 - MODEL_FIT) * rf;
+    // Walk the teardown. `pos` is fractional: its integer part is the layer
+    // currently on TOP — the one this beat takes off — and the remainder is how
+    // far through its removal the walk has got. Every layer below it is on screen
+    // the whole time; see the `walk` useMemo for why that is the whole point.
+
+    // The usable frame, measured once for everything below it. It is NOT the
+    // frustum: a fixed 7rem gradient (plus the nav) caps the top and a fixed 8rem
+    // one caps the bottom — see the vignette element — and anything under them is
+    // invisible whatever the projection says. The finale always knew this; the walk
+    // did not, which is how the assembled table's near legs ended up dissolving
+    // into the bottom gradient instead of standing inside the frame.
+    const halfVAll = Math.tan(((cam.fov * Math.PI) / 180) / 2) * Math.abs(cam.position.z);
+    const perPxAll = (2 * halfVAll) / Math.max(1, size.height);
+    const bandTop = halfVAll - BAND_TOP * perPxAll;
+    const bandBottom = -halfVAll + BAND_BOTTOM * perPxAll;
+    const clearHalf = Math.max(0.5, (bandTop - bandBottom) / 2);
+    const halfWAll = halfVAll * (size.width / Math.max(1, size.height));
+
+    // The scale each beat is held at: the same two-constraint fit the finale uses
+    // on the stack, against that beat's own projected half-height and plan
+    // half-extent. Recomputed every frame rather than measured once with the
+    // geometry, because the camera dollies through the walk and the band is in
+    // PIXELS — so each beat is framed against the frame it is actually drawn in.
+    // Into reused scratch, since both the dolly and the removal travel read it and
+    // this loop runs sixty times a second.
+    let zooms: Float64Array | null = null;
+    if (walk) {
+      if (zoomsRef.current.length !== walk.length) zoomsRef.current = new Float64Array(walk.length);
+      zooms = zoomsRef.current;
+      for (let k = 0; k < walk.length; k++) {
+        zooms[k] = Math.min(
+          FIT_ZOOM_MAX,
+          Math.max(
+            FIT_ZOOM_MIN,
+            FIT_MARGIN * Math.min(clearHalf / walk[k].halfScreen, halfWAll / walk[k].planHalf)
+          )
+        );
+      }
+    }
+
+    let fit = 1;
     let layerPos = 0;
-    if (seq) {
-      // Nine equal beats, not eight. Mapping the walk onto 0..n-1 gave the LAST
-      // capture no beat at all — the walk position only reached it on the final
-      // pixel of the page — so the electronics box was a caption nobody could
-      // read over a model nobody saw. Scaled by n and clamped, every capture
-      // including the last gets a hold of its own, and the walk now ends at
-      // SEQ_END with the diagram beat after it rather than running off the page.
-      const rawU = clamp01((p - SEQ_START) / (SEQ_END - SEQ_START)) * seq.length;
-      const raw = Math.min(seq.length - 1, rawU);
-      const base = Math.min(seq.length - 1, Math.floor(raw));
-      // Hold, then hand over: the capture sits still for most of its scroll and
-      // only comes apart at the end. This is what buys a readable beat per
-      // subassembly without shortening the removal.
+    if (walk && zooms) {
+      // One beat per layer, and the last layer keeps its beat WITHOUT being
+      // removed: the electronics box is the innermost thing in the machine and
+      // the payoff of the whole teardown, so the walk ends holding it rather than
+      // dissolving it into an empty frame half a beat before the diagram arrives.
+      // (The capture walk needed the opposite fix — mapping onto 0..n-1 gave its
+      // last capture no beat at all.)
+      const rawU = clamp01((p - WALK_START) / (WALK_END - WALK_START)) * walk.length;
+      const raw = Math.min(walk.length - 1, rawU);
+      const base = Math.min(walk.length - 1, Math.floor(raw));
+      // Hold, then hand over: the machine sits still for most of each beat's
+      // scroll and only comes apart at the end. This is what buys a readable beat
+      // per subassembly without shortening the removal.
       const pos =
-        base + smoothstep(clamp01((raw - base - (1 - SEQ_TRANSITION)) / SEQ_TRANSITION));
+        base + smoothstep(clamp01((raw - base - (1 - WALK_TRANSITION)) / WALK_TRANSITION));
       // Framing runs on its own curve, and — the part that matters — a LATER one.
       // The dolly has to be slow, but it also must not run while the part is
-      // leaving: the next capture is usually smaller, so reframing for it means
+      // leaving: what is left after a removal is smaller, so reframing for it means
       // zooming IN, and zooming in on the thing currently being lifted out
       // cancels the lift. The part grows in frame as fast as it climbs and the
       // beat reads as a push-in rather than a removal. Shifted by FRAME_LAG the
       // dolly starts as the part releases and finishes half way into the next
-      // capture's hold, so the removal happens at a steady scale and the reframe
+      // layer's hold, so the removal happens at a steady scale and the reframe
       // happens over a model that is standing still.
       const fr = rawU - FRAME_LAG;
-      const fb = Math.max(0, Math.min(seq.length - 1, Math.floor(fr)));
-      const framePos = fb + smoothstep(clamp01((fr - fb) / SEQ_FRAME_EASE));
-      const i0 = Math.min(seq.length - 1, Math.floor(framePos));
-      const i1 = Math.min(seq.length - 1, i0 + 1);
+      const fb = Math.max(0, Math.min(walk.length - 1, Math.floor(fr)));
+      const framePos = fb + smoothstep(clamp01((fr - fb) / WALK_FRAME_EASE));
+      const i0 = Math.min(walk.length - 1, Math.floor(framePos));
+      const i1 = Math.min(walk.length - 1, i0 + 1);
       const t = framePos - i0;
       layerPos = pos;
-      material.uniforms.uLayer.value = pos;
 
       // Switch the caption at the midpoint of the handoff, where the outgoing
       // part is halfway out of frame and the incoming one is halfway resolved.
@@ -3473,87 +3862,44 @@ function SplatCloud({
       // loop costs nothing. The diagram gets a caption of its own, claimed once
       // the parts are visibly on their way down.
       //
-      // -1 before the walk begins. The captions name captures, and until
-      // SEQ_START the page is showing the wordmark and then the assembled table
-      // — so "00 / ENTIRE TABLE" was sitting over the logo from the first pixel
-      // of the page, which is what the -1 initial state was always meant to
-      // prevent. `pos` is pinned at 0 through those beats, so rounding it
-      // reported capture 0 immediately and the caption never had a chance to
-      // stay hidden.
-      const shown = p < SEQ_START ? -1 : fe > 0.25 ? seq.length : Math.round(pos);
+      // -1 while the wordmark is still the subject. Past the morph the assembled
+      // machine has its own caption (stage 0) for the whole of B_TABLE, which the
+      // capture walk never managed to give it: `pos` is pinned at 0 through those
+      // beats, so a caption derived from `pos` alone claimed the first subassembly
+      // over the logo from the first pixel of the page.
+      //
+      // Stage indices, not layer indices — the two are offset by one, because
+      // stage 0 is the assembled table and the CAD carries only the eight
+      // subassemblies. So beat k names the layer it is about to take off, k + 1.
+      const shown =
+        p < MORPH_END
+          ? -1
+          : fe > 0.25
+            ? walk.length + 1
+            : p < WALK_START
+              ? 0
+              : Math.min(walk.length, 1 + Math.round(pos));
       if (shown !== layerSeen.current) {
         layerSeen.current = shown;
         onLayer?.(shown);
       }
-      // Density LOD. `pos` sits on a whole number for most of each capture's
-      // scroll and only travels during the handoff, so this is 1 on every hold
-      // and bottoms out where both captures are on screen with every gaussian
-      // in both inflated — the one frame in the beat that cannot afford them.
-      // It is a FLOOR, not a fixed rate: the shader raises it per splat to
-      // whatever that splat's alpha headroom allows, so what moves is the fill
-      // rate, not the picture.
-      // Keyed on the handoff, NOT on `t` above: `t` now runs on the framing
-      // curve, which is still mid-drift while the splats are long since seated.
-      material.uniforms.uDensity.value = lerp(
-        1,
-        SEQ_LOD_MIN,
-        Math.pow(Math.sin((pos - Math.floor(pos)) * Math.PI), SEQ_LOD_CURVE)
-      );
-      // Hand the closing shot over to the CAD. The last capture dissolves out in
-      // place while its drawing dissolves in, so this is a register-true swap
-      // rather than a cut — the captures were placed using the CAD's own subject
-      // centres, so the two occupy the same world frame to about 1%.
-      material.uniforms.uSplatOut.value = cad
-        ? smoothstep(clamp01(fe / FINALE_HANDOVER))
-        : 0;
 
-      // Draw only the captures with any weight — those within one of `pos`. The
-      // epsilon keeps a held capture from dragging its neighbours along at zero
-      // alpha, which would be up to 80k splats of pure waste every frame.
-      const lo = Math.max(0, Math.ceil(pos - 1 + 1e-6));
-      const hi = Math.min(seq.length - 1, Math.floor(pos + 1 - 1e-6));
-      spanStart = seq[lo].offset;
-      spanEnd = seq[hi].offset + seq[hi].count;
-
-      // Frame whichever capture is on screen: the subassemblies run from the
-      // whole 5-unit table down to a 1.1-unit control column, so hold them to a
-      // similar size and keep each one's own centre on the camera's axis. Ramped
-      // in on the morph — while the word is still readable it must be untouched,
-      // at its own scale and centred, exactly as before.
-      const zoom = lerp(seq[i0].zoom, seq[i1].zoom, t);
+      // Frame what is still on the machine: the walk starts on the whole 5-unit
+      // table and ends on a 1.1-unit box, so hold each state to the clear band and
+      // keep its own centre on the camera's axis. Ramped in on the morph — while
+      // the word is still readable it must be untouched, at its own scale and
+      // centred, exactly as before.
+      const zoom = lerp(zooms[i0], zooms[i1], t);
       fit = lerp(1, zoom, rf);
       let finCentre = 0;
-      // Hoisted out of the finale branch below: the caption is on screen for the
-      // whole walk, not just the last beat, so the horizontal reservation needs
-      // these too.
-      const halfVAll =
-        Math.tan(((cam.fov * Math.PI) / 180) / 2) * Math.abs(cam.position.z);
-      const perPxAll = (2 * halfVAll) / Math.max(1, size.height);
-      // The clear vertical band, hoisted for the same reason: the centring below
-      // now runs after the caption clamp, so it has to read the band the fit was
-      // taken from rather than recompute it.
-      let bandTop = halfVAll;
-      let bandBottom = -halfVAll;
       if (finale && fe > 0) {
-        // Pull back to the whole drawing. Fitted to the live frustum rather than
-        // to a constant: the stack is ~11 units tall against a ~9-unit frame, and
-        // on a phone it is the WIDTH that runs out first. finale.halfH is already
-        // measured up the screen, so the vertical term needs no further tilt
-        // correction.
-        const halfV = halfVAll;
-        // World units per screen pixel, so the gradient bands can be taken off
-        // the top and bottom of the frustum. They are not symmetric, so this
-        // moves the usable centre as well as shrinking the usable height.
-        const perPx = perPxAll;
-        const top = halfV - FINALE_BAND_TOP * perPx;
-        const bottom = -halfV + FINALE_BAND_BOTTOM * perPx;
-        bandTop = top;
-        bandBottom = bottom;
-        const clearHalf = Math.max(0.5, (top - bottom) / 2);
-        const halfW = halfV * (size.width / size.height);
+        // Pull back to the whole drawing, through the identical two constraints:
+        // the stack is ~11 units tall against a ~9-unit frame, and on a phone it is
+        // the WIDTH that runs out first. finale.halfH is already measured up the
+        // screen, so the vertical term needs no further tilt correction.
         const diagram = Math.min(
-          SEQ_ZOOM_MAX,
-          FINALE_MARGIN * Math.min(clearHalf / finale.halfH, halfW / finale.radius)
+          FIT_ZOOM_MAX,
+          FIT_MARGIN * Math.min(clearHalf / finale.halfH, halfWAll / finale.radius)
         );
         // Isolating a layer refits the frame to that layer, through the same two
         // constraints — it is the identical calculation with one part's extents
@@ -3563,7 +3909,7 @@ function SplatCloud({
         if (focGeo) {
           const close = Math.min(
             diagram * FOCUS_GAIN_MAX,
-            (FINALE_MARGIN * Math.min(clearHalf, halfW)) / ins.fitR
+            (FOCUS_FILL * FIT_MARGIN * Math.min(clearHalf, halfWAll)) / ins.fitR
           );
           target = lerp(diagram, close, foc);
         }
@@ -3583,20 +3929,17 @@ function SplatCloud({
       let shiftX = 0;
       const reservePx = reserveRef.current ?? 0;
       if (reservePx > 0) {
-        // The column only matters once there is a caption in it. Captions appear
-        // at SEQ_START, so ramp across the table beat that precedes it: the model
-        // is already seated when the text arrives, instead of sliding out from
-        // under copy the reader has started on.
-        const res = smoothstep(
-          clamp01((p - MORPH_END) / Math.max(1e-6, SEQ_START - MORPH_END))
-        );
+        // The column only matters once there is a caption in it. Captions appear at
+        // the start of the walk, so this rides the table beat that precedes it (see
+        // tableIn): the model is already seated when the text arrives, instead of
+        // sliding out from under copy the reader has started on.
+        const res = tableIn;
         if (res > 0) {
           const claim = (reservePx + CAPTION_GUTTER) * perPxAll;
-          const halfW = halfVAll * (size.width / Math.max(1, size.height));
-          // The subject's half-extent in its OWN space — a capture's `radius` is
+          // The subject's half-extent in its OWN space — a beat's `radius` is
           // the max of its half-extents, so a tall narrow part reads as wider than
           // it is, which errs the safe way.
-          const walkRad = lerp(seq[i0].radius, seq[i1].radius, t);
+          const walkRad = lerp(walk[i0].radius, walk[i1].radius, t);
           const radObj = finale ? lerp(walkRad, finale.radius, fe) : walkRad;
           // Object-space radius is NOT the on-screen half-width: the group carries
           // a real yaw (see grp.rotation.y — MODEL_YAW, the drifting spin, and
@@ -3624,15 +3967,15 @@ function SplatCloud({
             // Only if the subject cannot fit the clear width even pushed hard
             // right does it have to shrink. This is what keeps the diagram as
             // large as the frame allows instead of shrinking it on principle.
-            const availHalf = Math.max(0.5, halfW - (claim + claimR) / 2);
-            fit = lerp(fit, Math.min(fit, (availHalf * FINALE_MARGIN) / rad), res);
+            const availHalf = Math.max(0.5, halfWAll - (claim + claimR) / 2);
+            fit = lerp(fit, Math.min(fit, (availHalf * FIT_MARGIN) / rad), res);
             // Left edge sits at shiftX - rad*fit and must clear -halfW + claim;
             // the right edge at shiftX + rad*fit must clear halfW - claimR. Push
             // only as far as the first demands, and never past what the second
             // allows — the fit clamp above is what guarantees those two can both
             // be satisfied.
-            const need = claim - halfW + rad * fit;
-            const room = halfW - claimR - rad * fit;
+            const need = claim - halfWAll + rad * fit;
+            const room = halfWAll - claimR - rad * fit;
             shiftX = Math.min(Math.max(0, need), Math.max(0, room)) * res;
           }
         }
@@ -3649,34 +3992,86 @@ function SplatCloud({
         // to it, so it stays registered against the seat it was picked from and
         // the return lands it back exactly where it was.
         const cen = focLayer
-          ? lerp(finale.centreY, ins.cenY * Math.cos(grp.rotation.x) + ins.seat, foc)
+          ? lerp(finale.centreY, ins.cenY * cosPitch + ins.seat, foc)
           : finale.centreY;
         finCentre = (cen * fit - (bandTop + bandBottom) / 2) * fe;
       }
 
-      // Two centrings, blended. The walk centres each capture on its own axial
+      // Two centrings, blended. The walk centres each beat's subject on its own axial
       // middle, which is an object-space offset and so has to be rotated with the
       // group. The diagram is stacked up the screen instead, so its centring is
       // already a world-space shift and must NOT be rotated — running it through
       // the pitch is what would slide the stack off the top of the frame.
-      const cy = lerp(seq[i0].centreY, seq[i1].centreY, t) * fit * rf * (1 - fe);
+      const cy = lerp(walk[i0].centreY, walk[i1].centreY, t) * fit * rf * (1 - fe);
       grp.position.set(
         // The pitch is about X, so a world +x shift stays horizontal on screen and
         // needs none of the cos/sin correction the vertical centring does.
         shiftX,
-        -cy * Math.cos(grp.rotation.x) - finCentre,
-        -cy * Math.sin(grp.rotation.x)
+        -cy * cosPitch - finCentre,
+        -cy * sinPitch
       );
     }
-    // The closing diagram. The parts are children of the same group as the splat
-    // cloud, so they inherit the framing, the tilt and the centring for free and
-    // land registered against the capture they replace. Each descends onto its
-    // seat along uAxis — the same axis the teardown lifted things out on — and the
-    // stagger runs bottom-up, so the drawing assembles the way a hand would lay
-    // the parts out: chassis first, outer shell last.
+    // The machine itself: the layer walk, then the closing diagram. The parts are
+    // children of the same group as the particle cloud, so they inherit the
+    // framing, the tilt and the centring for free and land registered against the
+    // dust they solidify out of. Each descends onto its seat along `axis` — the
+    // same one the teardown lifted it out on — and the stagger runs bottom-up, so
+    // the drawing assembles the way a hand would lay the parts out: chassis first,
+    // outer shell last.
     if (cad) {
+      // How hard the walk is pointing at anything at all. Rides the table beat in,
+      // so the assembled machine gets one beat of being nothing but itself, and is
+      // taken back out by `fe` so the diagram is handed over clean for the pointer.
+      // WHICH layer it points at is a per-layer distance below.
+      const deckEmph = tableIn * (1 - fe);
+      // The light rig and the eye, resolved ONCE. Nothing in either varies by
+      // layer: the diagram is deliberately lit by directional lights so that the
+      // cabinet at the top of the stack and the electronics box at the bottom read
+      // the same, and there is one camera. Per layer this was four lerps and a
+      // 4x4 matrix multiply eight times over, for eight identical answers.
+      //
+      // The rig crosses from the assembled close-up to the diagram it was actually
+      // fitted for, on the same ramp that pulls the camera back. The endpoints are
+      // literal, so at fe = 1 the finale is bit-for-bit the shot the fit was
+      // measured against; everything before it is the walk's own condition. See the
+      // WALK_* block for why the two differ.
+      const rigExposure = lerp(WALK_EXPOSURE, CAD_EXPOSURE, fe);
+      const rigAmbient = lerp(WALK_AMBIENT, CAD_AMBIENT, fe);
+      const rigAo = lerp(WALK_AO, CAD_AO, fe);
+      const rigAoDirect = lerp(WALK_AO_DIRECT, CAD_AO_DIRECT, fe);
+      // The specular half of the shading needs the eye, and the camera drifts with
+      // the pointer every frame. See uCamPos in the fragment shader for why three's
+      // own cameraPosition — and viewMatrix, hence uViewProj — are not good enough
+      // here: three refreshes them on a program or camera-object change, not once a
+      // frame.
+      const viewProj = viewProjRef.current
+        .copy(camera.projectionMatrix)
+        .multiply(camera.matrixWorldInverse);
       for (let ci = 0; ci < cad.length; ci++) {
         const c = cad[ci];
+        // How far through its own removal this layer is. Beat ci takes off layer
+        // ci, so the walk position minus the index is exactly its progress —
+        // 0 while it is still buried under the beats above it, 1 once it is gone.
+        // The LAST layer never comes off; see the note where `pos` is derived.
+        const rem =
+          walk && ci < walk.length - 1 ? clamp01(layerPos - ci) : 0;
+        // Travel to leave, in frame-heights of the framing THIS layer is removed
+        // under — not in layer radii. Each beat is fitted to the clear band, so a
+        // fixed world distance clears the viewport for the 5-unit cabinet and does
+        // not come close for the stack left at the end of the walk. Sized against
+        // the camera at rest, the widest the frame ever gets, so it always clears.
+        const exit =
+          walk && zooms && ci < walk.length
+            ? (PEEL_LIFT_FRAMES * CAM_HALF_H) / zooms[ci] + c.radius
+            : 0;
+        // Late, and eased in: the part has to be properly porous before it moves,
+        // or an opaque shell drags across the very layer it is uncovering. The
+        // clamp is load-bearing, not decorative — before PEEL_LIFT_START the
+        // argument is negative and a cubic keeps the sign, so an unclamped ease
+        // would push the layer DOWN into the machine for the first half of its own
+        // beat. Same ease(clamp01(...)) shape as every other ramp in this loop.
+        const lift =
+          easeInCubic(clamp01((rem - PEEL_LIFT_START) / (1 - PEEL_LIFT_START))) * exit;
         const land = smoothstep(clamp01((fe - c.lag * FINALE_STAGGER) / (1 - FINALE_STAGGER)));
         // Isolation rides on top of the landing fade as a second opacity, and the
         // two multiply. Every layer is fully out of the way at sel >= 0 except the
@@ -3689,16 +4084,63 @@ function SplatCloud({
         // Hover is per layer and damped, so crossing a boundary is a swap rather
         // than a flicker, and a pointer skimming across the stack does not strobe.
         c.hot = damp(c.hot, ins.hot === ci && sel < 0 ? 1 : 0, ORBIT_RATE, dtc);
-        c.material.uniforms.uHot.value = c.hot;
+        // Where this layer sits relative to the front of the walk, in beats.
+        // Positive means still buried under it, zero means it is the one coming
+        // off, negative means it has already gone.
+        //
+        // A DISTANCE, not a floor() of the walk position. Keyed on the integer beat
+        // the emphasis stepped at every boundary: layer k+1 went from fully dimmed
+        // to fully lit in one frame while the six under it all released their dim
+        // in the same frame, so the entire visible machine changed grade seven
+        // times across the walk, each time landing exactly on the start of a hold —
+        // the one moment the beat is asking to be read as a still.
+        const dd = ci - layerPos;
+        // Peaks on this layer's own hold and releases over the first 40% of its
+        // removal, which is what the emphasis is for: it says "this one next", and
+        // once the layer is visibly leaving that has been said.
+        const hotW = Math.max(0, 1 - Math.abs(dd) / WALK_EMPH_REACH);
+        // Complementary, and deliberately non-overlapping: a layer is never both
+        // lit and pushed back. Full for anything a beat or more down, released as
+        // the front arrives at it.
+        const dimW = clamp01((dd - WALK_EMPH_REACH) / (1 - WALK_EMPH_REACH));
+        // Two regimes share these channels. During the walk the layer about to
+        // come off is lit and the ones still buried under it go back a little, so
+        // the eye is told where the next move happens; during the hold beat the
+        // pointer owns them. They cannot both be live, so the larger wins rather
+        // than needing a blend: the walk's term is already scaled to zero by `fe`
+        // before the diagram is pointable.
+        c.material.uniforms.uHot.value = Math.max(c.hot, deckEmph * hotW * WALK_HOT);
+        // The acid rim is the POINTER's channel alone — see uAccent in the shader.
+        c.material.uniforms.uAccent.value = c.hot;
         // Everything that is not the thing being pointed at goes back. Keyed on
         // whether ANY layer is hot rather than on this one being cold, so with the
         // pointer off the diagram all eight sit at full strength.
-        c.material.uniforms.uDim.value =
-          sel >= 0 ? 0 : ins.hot >= 0 && ins.hot !== ci ? 1 - c.hot : 0;
+        const insDim = sel >= 0 ? 0 : ins.hot >= 0 && ins.hot !== ci ? 1 - c.hot : 0;
+        c.material.uniforms.uDim.value = Math.max(insDim, deckEmph * dimW * WALK_DIM);
 
-        const fin = land * c.alpha;
-        c.root.visible = fin > 0.002;
+        // Two opacities that multiply, and a third that does not. `appear` and the
+        // isolation are both real transparency; the peel is a DISSOLVE, which the
+        // shader spends per fragment against the detail channel rather than as a
+        // uniform alpha, so it stays out of `fin` and travels on its own uniform.
+        const fin = appear * c.alpha;
+        const peel = rem * (1 - land);
+        // A fully evaporated layer is not merely invisible, it is not drawn: at
+        // the end of the walk that is six of the eight, and skipping them takes
+        // their vertex work and their discarded fragments off the frame entirely.
+        c.root.visible = fin > 0.002 && peel < 0.999;
         if (!c.root.visible) continue;
+        // Which of the two programs this layer draws with. A pure function of
+        // scroll like everything else here, computed fresh every frame rather
+        // than latched on an edge, so scrubbing backwards through a beat boundary
+        // cannot leave a layer on the wrong one. It changes on the two frames a
+        // beat where the dissolve starts and ends — four to thirty-seven
+        // assignments, twice — and buys early-z and tile-based HSR back for every
+        // seated layer for the rest of the page. See the dissolve block in
+        // CAD_FRAG.
+        const want = peel > 0 ? c.peelMaterial : c.material;
+        if (c.meshes[0].material !== want) {
+          for (const im of c.meshes) im.material = want;
+        }
         // Blend only while this layer is actually fading. Once it is seated, hand it
         // to the OPAQUE pass: three sorts opaque objects front-to-back, so early-z
         // throws away the hidden layers before shading them, whereas the transparent
@@ -3706,25 +4148,37 @@ function SplatCloud({
         // in full. Same pixels, a fraction of the fragment work — and at fin == 1
         // there is no alpha left to blend anyway. No needsUpdate: neither flag feeds
         // a shader define, so this costs nothing but a render-list bucket change.
-        const solid = fin >= 0.999;
+        //
+        // Only ever asked of the solid variant: the peel one is transparent by
+        // construction, because a dissolving layer always has fragments at partial
+        // alpha in it.
+        const solid = fin >= 0.999 && peel <= 0;
         if (c.material.transparent === solid) {
           c.material.transparent = !solid;
           c.material.blending = solid ? THREE.NoBlending : THREE.CustomBlending;
         }
-        // `land`, not `fin`: the drop is the LANDING, and folding the isolation
-        // opacity into it would send every unselected layer back up into the air
-        // on its way out instead of simply fading where it sits.
-        c.root.position.copy(axis).multiplyScalar(c.seatY + (1 - land) * FINALE_DROP);
+        // From wherever the walk left it to its seat on the explode axis. A layer
+        // the walk lifted out of frame flies back down; the one it never removed
+        // (the electronics box, whose seat IS the datum at zero) does not move at
+        // all, which is exactly right — the diagram is built on it.
+        //
+        // `land`, not `fin`: the flight is the LANDING, and folding the isolation
+        // opacity into it would send every unselected layer back into the air on
+        // its way out instead of simply fading where it sits.
+        c.root.position.copy(axis).multiplyScalar(lerp(lift, c.seatY, land));
         c.material.uniforms.uFade.value = fin;
-        // The specular half of the shading needs the eye, and the camera drifts with
-        // the pointer every frame. See uCamPos in the fragment shader for why three's
-        // own cameraPosition — and viewMatrix, hence uViewProj — are not good enough
-        // here: three refreshes them on a program or camera-object change, not once a
-        // frame.
+        // Unwinds against the landing, so each part re-forms from its own tracery
+        // as it flies to its seat rather than popping back whole. Staggered for
+        // free: `land` already is.
+        c.material.uniforms.uPeel.value = peel;
+        // One material per layer, so the shared rig has to be written into each of
+        // them — but it is the same eight numbers and the same matrix every time.
+        c.material.uniforms.uExposure.value = rigExposure;
+        c.material.uniforms.uAmbient.value = rigAmbient;
+        c.material.uniforms.uAo.value = rigAo;
+        c.material.uniforms.uAoDirect.value = rigAoDirect;
         c.material.uniforms.uCamPos.value.copy(camera.position);
-        c.material.uniforms.uViewProj.value
-          .copy(camera.projectionMatrix)
-          .multiply(camera.matrixWorldInverse);
+        c.material.uniforms.uViewProj.value.copy(viewProj);
       }
     }
 
@@ -3813,23 +4267,22 @@ function SplatCloud({
       st.depths = new Float32Array(data.count);
       st.lastP = -1;
     }
-    // Thin by a stride over the live span. The governor's lever has to be a
-    // FRACTION, not an absolute count: in sequence mode the span is one capture
-    // (~45k) while the cloud is all nine (~325k), so a budget scaled off the
-    // whole cloud would always exceed the span and never thin anything.
-    const live = spanEnd - spanStart;
+    // Thin by a stride, not by a count. The cloud is one set — the word's
+    // particles, which are points sampled on the machine's own surface — so there
+    // is no live span to scale against and the whole of it is always in play.
     const stride = Math.max(1, Math.round(1 / GOV_COUNT[g.level]));
     const camKey = camera.position.x + camera.position.y * 7.1 + camera.position.z * 13.3;
 
-    // Once the diagram has taken over, stop paying for the splats entirely.
+    // Once the mesh has taken the machine over, stop paying for the cloud
+    // entirely.
     //
-    // uSplatOut reaches 1 at FINALE_HANDOVER — 42% into the finale — after which
-    // every gaussian is multiplied by zero. It was still costing a full frame's
-    // work: ~45k alpha-blended instanced quads rasterised and shaded to write
-    // nothing, plus the 45k counting sort re-run on every frame the camera moved,
-    // which is every frame, because the pointer parallax never settles. That was
-    // running underneath a million-triangle CAD diagram, which is why the finale
-    // was the slowest beat on the page.
+    // uSplatOut reaches 1 at SOLID_END — the end of the morph — after which every
+    // particle is multiplied by zero. It was still costing a full frame's work:
+    // alpha-blended instanced quads rasterised and shaded to write nothing, plus
+    // the counting sort re-run on every frame the camera moved, which is every
+    // frame, because the pointer parallax never settles. That was running
+    // underneath a million-triangle CAD diagram, which is why the finale was the
+    // slowest beat on the page.
     const splatsGone = material.uniforms.uSplatOut.value >= 0.999;
     mesh.visible = !splatsGone;
     if (splatsGone) st.lastP = -1; // resort on the way back up
@@ -3852,11 +4305,7 @@ function SplatCloud({
         st.depths,
         st.buckets,
         st.counts,
-        spanStart,
-        spanEnd,
-        stride,
-        layerPos,
-        axis
+        stride
       );
       attr.needsUpdate = true;
       st.lastP = p;
@@ -3940,18 +4389,33 @@ function SplatCloud({
     }
 
     // ------------------------------------------------------------- warm-up
-    // One shape a frame onto the GPU, while the diagram is still nowhere near
+    // Shapes onto the GPU by the byte, while the machine is still nowhere near
     // the screen. See the note on `warm` for what this is buying back.
+    //
+    // BOTH GATES MOVED WHEN THE TEARDOWN CAME OFF THE GAUSSIANS, because both
+    // were written for a page where the CAD was one closing beat. The stand-down
+    // was `fe > 0`, i.e. 763vh — but the meshes are now first drawn at SOLID_START,
+    // 105vh, so the guard could no longer fire before the geometry was needed and
+    // was dead. And the start was `intro.current >= 1`: 2.4 s of wall clock, on a
+    // page whose pacing leash lets a fling from the top reach 275vh. A visitor who
+    // moved the wheel in those 2.4 s therefore arrived at the assembled table with
+    // zero bytes uploaded and took the whole 19 MB on one frame — the exact stall
+    // this block exists to prevent, relocated onto the morph handover, which is
+    // already the most expensive frame of the page.
+    //
+    // So: start as soon as there is anything to draw, and stand down when the
+    // machine actually appears rather than when the diagram does.
     const wm = warm.current;
     if (cad && !wm.done) {
-      if (fe > 0) {
-        // Too late to be worth anything — the visitor got here first. Stand
-        // down and let the remaining shapes upload as they are drawn, which is
-        // exactly what happened before any of this existed.
+      if (appear > 0) {
+        // On screen. Everything visible has uploaded on its own by now, and any
+        // remaining 1x1 renders would be stacked on top of a full frame instead of
+        // an empty one. Stand down and let the rest upload as they are drawn,
+        // which is exactly what happened before any of this existed.
         wm.done = true;
         wm.rt?.dispose();
         wm.rt = null;
-      } else if (intro.current >= 1) {
+      } else if (g.frame > 1) {
         if (!wm.rt) {
           wm.rt = new THREE.WebGLRenderTarget(1, 1, { depthBuffer: true, stencilBuffer: false });
         }
@@ -3973,11 +4437,13 @@ function SplatCloud({
           }
           const c = cad[li];
           const im = c.meshes[si];
-          const g = c.geometries[si];
+          // Not `g` — that is the governor, three lines of scope up, and the
+          // shadow was one careless edit away from a very confusing bug.
+          const geo = c.geometries[si];
           spent += (im.instanceMatrix.array as Float32Array).byteLength;
-          if (g.index) spent += (g.index.array as ArrayBufferView).byteLength;
-          for (const key in g.attributes) {
-            spent += (g.attributes[key].array as ArrayBufferView).byteLength;
+          if (geo.index) spent += (geo.index.array as ArrayBufferView).byteLength;
+          for (const key in geo.attributes) {
+            spent += (geo.attributes[key].array as ArrayBufferView).byteLength;
           }
           // Visibility rather than a scene of its own: reparenting the mesh
           // would move it out from under the group whose matrix it is drawn
@@ -3988,6 +4454,18 @@ function SplatCloud({
           for (let k = 0; k < c.meshes.length; k++) c.meshes[k].visible = k === si;
           gl.setRenderTarget(wm.rt);
           gl.render(scene, camera);
+          // And once more with the dissolve variant, on the first shape only.
+          // compileAsync has already linked it (see the compile effect), but a
+          // link is not a draw, and some drivers do their last specialisation
+          // when a program is first actually used. Every shape shares one
+          // attribute layout, so one draw covers all 120 — and it happens here,
+          // 100vh before the first removal, rather than on the frame the cabinet
+          // starts coming apart.
+          if (wm.shape === 0) {
+            im.material = c.peelMaterial;
+            gl.render(scene, camera);
+            im.material = c.material;
+          }
           gl.setRenderTarget(null);
           for (let k = 0; k < c.meshes.length; k++) c.meshes[k].visible = true;
           c.root.visible = wasRoot;
@@ -4006,10 +4484,19 @@ function SplatCloud({
     // DiagramMsaa can tell this frame from the last one. The camera is added
     // there rather than here — CameraRig has not run yet.
     //
-    // Gated on the splats being GONE rather than on `fe`: uTime advances every
-    // frame and is not in this sum, so while the cloud is still drawn its
-    // simmer would be skipped over. By the time this can be true it is
+    // Gated on the CLOUD being gone rather than on `fe`: uTime advances every
+    // frame and is not in this sum, so while the cloud is still drawn its simmer
+    // would be skipped over. By the time this can be true it is
     // multiplied out to nothing and the mesh is not drawn at all.
+    //
+    // Worth saying plainly, because the threshold moved a long way and nothing
+    // recorded it: `splatsGone` used to sit deep in the finale, when the cloud was
+    // nine gaussian captures. It now fires at SOLID_END — 149vh of 940 — so this
+    // skip covers the ENTIRE WALK, not just the closing beat, and parking at any
+    // hold in the teardown costs nothing at all. That is the largest single saving
+    // on the page. It is sound because everything not in the hash below (uPeel,
+    // uAccent, uExposure, uAmbient, uAo, uAoDirect) is a pure function of `p`,
+    // which is, and because driveScroll ARRIVES rather than approaching forever.
     const canIdle = !!cad && splatsGone && intro.current >= 1 && wm.done;
     let sig = p * 7919 + progressRef.current * 6271 + fit * 4271;
     sig +=
@@ -4051,12 +4538,12 @@ function SplatCloud({
   );
 }
 
-// Adaptive quality governor. The splat cloud is fill-rate-bound on weak GPUs
-// (Safari's WebGL runs this at a fraction of Chrome's throughput; phones have
-// a fraction of desktop fill). Rather than sniffing browsers, watch the real
-// frame cadence and walk a quality ladder: first render scale (dpr), then
-// splat density. Every animation beat stays identical — degradation is only
-// resolution and grain density. Recovers (with hysteresis) up to the initial
+// Adaptive quality governor. The particle cloud is fill-rate-bound on weak GPUs
+// (Safari's WebGL runs this at a fraction of Chrome's throughput; phones have a
+// fraction of desktop fill). Rather than sniffing browsers, watch the real frame
+// cadence and walk a quality ladder: first render scale (dpr), then particle
+// density. Every animation beat stays identical — degradation is only resolution
+// and grain density. Recovers (with hysteresis) up to the initial
 // tier when the device turns out to have headroom.
 //
 // The RUNGS are multipliers on the base render scale, and they are applied by
@@ -4073,11 +4560,28 @@ function SplatCloud({
 // and under scroll it flickered between two rungs and settled back at the top.
 // Either way the ladder was decorative. A plain number prop, owned in React
 // state, agrees with configure's check and therefore sticks.
-const GOV_DPR = [1, 0.85, 0.72, 0.72, 0.6];
-// Density is applied as a stride (draw every Nth splat of the live span), so
-// these quantise to 1/round(1/x) — keep them at reciprocals of whole numbers or
-// a rung silently does nothing. 0.7 used to round to a stride of 1, i.e. no
-// thinning at all on the second-worst tier.
+// Rungs 2 and 3 used to share a render scale of 0.72, on the understanding that
+// what separated them was the particle density below. That stopped being true
+// when the teardown moved onto the CAD: GOV_COUNT is read in exactly one place,
+// the sort stride, and that sits inside `if (!splatsGone)` — so from SOLID_END,
+// 149vh of a 940vh hero, the density lever moves nothing that is drawn. Rung 3
+// was then a literal no-op over 84% of the page, and the consequence was worse
+// than a wasted step: every demotion is a probe, so a device that walked 2 -> 3
+// measured no gain, concluded resolution was not its problem, and pinned
+// `floor` at 2 — permanently, for the rest of the page, including the finale
+// where rungs 3 and 4 genuinely would have helped. The only escape was
+// GOV_LEAP_MS, so a device sitting at 30-40 fps, which is exactly the population
+// this ladder exists for, dead-ended.
+//
+// So every rung now moves the one lever that is live on every beat. Each step is
+// 26-30% fewer pixels: comfortably clear of GOV_MIN_GAIN and of vsync
+// quantisation, which is what a probe needs in order to mean anything.
+const GOV_DPR = [1, 0.85, 0.72, 0.62, 0.52];
+// Density is applied as a stride (draw every Nth particle of the cloud), so these
+// quantise to 1/round(1/x) — keep them at reciprocals of whole numbers or a rung
+// silently does nothing. 0.7 used to round to a stride of 1, i.e. no thinning at
+// all on the second-worst tier. It only bites over the word and the morph, which
+// is the only stretch of the page where the cloud is drawn at all.
 const GOV_COUNT = [1, 1, 1, 0.5, 1 / 3];
 const GOV_MAX_LEVEL = GOV_DPR.length - 1;
 const GOV_SLOW_MS = 26; // sustained above this (≈ <40fps) => degrade
@@ -4166,18 +4670,22 @@ function CameraRig({
 }
 
 // ------------------------------------------------------- multisampling
-// The closing diagram, and only the closing diagram, is drawn into a
-// multisampled buffer and blitted down.
+// Every frame that draws the machine — which is now most of the page — goes
+// through a multisampled buffer and is blitted down.
 //
 // It cannot be done with the canvas's own `antialias` flag, which is why this
 // exists at all: that flag is fixed when the context is created, and turning it
-// on would apply MSAA to the SPLAT pass as well — hundreds of thousands of
+// on would apply MSAA to the PARTICLE pass as well — a hundred and fifty thousand
 // alpha-blended quads, several deep, where every covered sample is a separate
-// blend. That pass is fill-rate bound already (see the pixel-budget block) and
-// is what 468vh of the page is made of. The diagram is the opposite: opaque
-// geometry, one draw call a shape, drawn on the one beat where the splats are
-// not drawn at all. So the multisampling goes where the edges are and nowhere
-// else.
+// blend. So the gate is `ins.solid`, which is exactly the threshold that stops
+// drawing the cloud: the multisampled pass and the alpha-blended pass can never
+// overlap, by construction rather than by tuning.
+//
+// This used to be gated on the closing diagram alone, and that is why the walk
+// aliased. The reasoning behind that gate was sound while everything before the
+// diagram was gaussians — soft gaussians genuinely cannot alias — but the walk is
+// now 468vh of perforated tracks, ring gears and the lip of every disc, which is
+// the most alias-prone content on the page and had no anti-aliasing at all.
 //
 // Resolution alone did not finish the job. A million triangles of CAD is mostly
 // silhouette — perforated tracks, ring gears, the lip of every disc — and those
@@ -4217,7 +4725,13 @@ void main() {
 // multisampling is about two thirds of a frame of the held diagram, more than
 // the render scale that rung 1 already drops. Halving it there is worth around
 // a millisecond and is the cheapest millisecond on the ladder.
-const MSAA_BY_LEVEL = [4, 2, 2, 0, 0];
+// Rung 3 keeps two samples where it used to drop to none. That zero was set when
+// multisampling covered ONE BEAT — the held diagram, a still picture — so losing it
+// cost a still frame some edge quality and bought back two thirds of a frame. It
+// now covers roughly 80% of the page, all of it moving and all of it hard-edged
+// CAD, and a mid-ladder rung that turns anti-aliasing off entirely is a visible
+// cliff rather than a graceful degradation. The floor still drops it.
+const MSAA_BY_LEVEL = [4, 2, 2, 2, 0];
 
 // The hold beat is a still picture that costs a million triangles and a
 // multisample resolve to produce, sixty times a second, for as long as somebody
@@ -4424,12 +4938,26 @@ function BackgroundParticles({
 
   useFrame((_state, delta) => {
     if (pointsRef.current) {
-      // Held still on the diagram beat, along with everything else there. Not an
-      // optimisation in itself — 160 motes are free — but the idle check above
-      // is exact, and a drift nothing else matches would either keep the beat
-      // rendering forever or, if left to accumulate through skipped frames,
-      // snap the dust sideways the moment something else woke the frame up.
-      if (!idle.current.can) {
+      // Advanced only over frames that were actually DRAWN, which is not the same
+      // question as whether the frame is skippable and used to be conflated with
+      // it. This read `!idle.current.can`, on the understanding that `can` meant
+      // "the diagram beat" — and it did, while `splatsGone` sat deep in the
+      // finale. It now fires at SOLID_END, 149vh, so the dust stopped moving for
+      // the remaining 791vh of the page, including the whole teardown, where
+      // frames are being drawn one after another and freezing the motes buys
+      // nothing at all.
+      //
+      // `drew` is the honest version of the same guard. It is last frame's value
+      // (DiagramMsaa writes it at priority 1), which is exactly right: a skipped
+      // frame contributes nothing, so the accumulate-through-skipped-frames snap
+      // this was protecting against still cannot happen, and on the hold beat the
+      // motes advance once and then stop with everything else.
+      //
+      // Deliberately NOT folded into `sig`. A mote rotation that changes the hash
+      // it is gated by is a loop: every drawn frame would move the dust, every
+      // move would change the hash, and the hold beat would render a million
+      // triangles forever.
+      if (idle.current.drew) {
         // per second, not per frame — the motes used to drift at double speed on
         // a 120Hz display
         pointsRef.current.rotation.y += 0.024 * Math.min(delta, 0.05);
@@ -4456,6 +4984,7 @@ function Scene({
   drive,
   text,
   onReady,
+  onFailed,
   onLayer,
   onQuality,
   selectRef,
@@ -4464,6 +4993,7 @@ function Scene({
   onSelect,
   onInspectable,
   onDiagram,
+  onSolid,
   msaa,
 }: {
   progressRef: React.RefObject<number>;
@@ -4475,6 +5005,7 @@ function Scene({
   drive: React.RefObject<Drive>;
   text: string;
   onReady?: () => void;
+  onFailed?: () => void;
   onLayer?: (i: number) => void;
   onQuality?: (level: number) => void;
   selectRef: React.RefObject<number>;
@@ -4483,6 +5014,9 @@ function Scene({
   onSelect?: (i: number) => void;
   onInspectable?: (v: boolean) => void;
   onDiagram?: (v: boolean) => void;
+  // Whether the frame is solid geometry with no particle pass over it, which
+  // is what decides multisampling. See the note beside ins.solid.
+  onSolid?: (v: boolean) => void;
   // Multisampling for the closing diagram: whether it owns the frame, and how
   // many samples the governor's current rung allows. See DiagramMsaa.
   msaa: number;
@@ -4501,6 +5035,7 @@ function Scene({
         reserveRightRef={reserveRightRef}
         drive={drive}
         onReady={onReady}
+        onFailed={onFailed}
         onLayer={onLayer}
         onQuality={onQuality}
         selectRef={selectRef}
@@ -4509,6 +5044,7 @@ function Scene({
         onSelect={onSelect}
         onInspectable={onInspectable}
         onDiagram={onDiagram}
+        onSolid={onSolid}
       />
       <BackgroundParticles progressRef={progressRef} idle={idle} />
       <CameraRig progressRef={progressRef} drive={drive} />
@@ -4526,6 +5062,7 @@ export default function ScrollScene({
     eyebrow: string;
     subtitle: string;
     scrollHint: string;
+    skip: string;
     loading: string;
   };
   stages: { title: string; text: string }[];
@@ -4533,6 +5070,16 @@ export default function ScrollScene({
   // the way back out of an open part, and the rail's accessible name.
   inspect: { hint: string; close: string; rail: string; cycle: string };
 }) {
+  // The captions are indexed by the beat the scene reports, so there has to be one
+  // for the assembled table, one per layer and one for the diagram. The layer count
+  // is checked against the file where cad lands (see the walk useMemo); this is the
+  // other half of the same invariant, and the pair of them is what stops the rail
+  // showing eight entries beside a caption that claims seven.
+  if (process.env.NODE_ENV !== 'production' && stages.length !== WALK_LAYERS + 2) {
+    console.warn(
+      `ScrollScene: ${stages.length} stage captions for ${WALK_LAYERS} layers; expected ${WALK_LAYERS + 2}.`
+    );
+  }
   const containerRef = useRef<HTMLDivElement>(null);
   // Two readings of the same scroll: the ref is exact and free (the canvas
   // reads it inside its own frame loop), the state is quantised and only exists
@@ -4550,6 +5097,11 @@ export default function ScrollScene({
   });
   const [mounted, setMounted] = useState(false);
   const [ready, setReady] = useState(false);
+  // The geometry is not coming. Everything the hero says in words is static text
+  // with no dependency on it, so on this path the copy is shown at full strength
+  // and the shimmer is dropped — the alternative, and what shipped, was 940vh of
+  // near-black with LOADING MODEL on it forever.
+  const [failed, setFailed] = useState(false);
   const [inView, setInView] = useState(true);
   // Render scale, owned here because <Canvas> reasserts its `dpr` prop on every
   // render — see the GOV_DPR block. `quality` is the governor's rung; the base
@@ -4560,9 +5112,15 @@ export default function ScrollScene({
   // budget than the rest of the hero, so this is an input to the render scale
   // rather than only a piece of presentation state — see PIXEL_BUDGET_DIAGRAM.
   const [diagram, setDiagram] = useState(false);
+  // Whether the frame is solid geometry, which is what multisampling follows.
+  // Deliberately NOT `diagram`: that flag exists for the closing beat's pixel
+  // budget and comes up in the last 9% of the page, and keying anti-aliasing to it
+  // is what left the entire 468vh walk aliased. See ins.solid.
+  const [solid, setSolid] = useState(false);
   const [dprBase, setDprBase] = useState(() => baseDpr());
   const handleQuality = useCallback((level: number) => setQuality(level), []);
   const handleDiagram = useCallback((v: boolean) => setDiagram(v), []);
+  const handleSolid = useCallback((v: boolean) => setSolid(v), []);
   useEffect(() => {
     const fit = () => setDprBase(baseDpr(diagram));
     fit();
@@ -4574,10 +5132,11 @@ export default function ScrollScene({
   // leash that trusted a stale `drive.p` would pin the visitor inside a hero
   // that is no longer animating.
   const inViewRef = useRef(true);
-  // -1 until the walk starts: the captions label captures, so there is nothing
+  // -1 until the walk starts: the captions label stages, so there is nothing
   // to say while the page is still showing the word.
   const [layer, setLayer] = useState(-1);
   const handleReady = useCallback(() => setReady(true), []);
+  const handleFailed = useCallback(() => setFailed(true), []);
   const handleLayer = useCallback((i: number) => setLayer(i), []);
 
   // ------------------------------------------------------------- inspection
@@ -4706,9 +5265,39 @@ export default function ScrollScene({
   const heroFadeRef = useRef<HTMLDivElement>(null);
   const railFillRef = useRef<HTMLDivElement>(null);
   const readoutRef = useRef<HTMLSpanElement>(null);
+  const skipRef = useRef<HTMLButtonElement>(null);
   const paintProgress = useCallback((p: number) => {
     if (heroFadeRef.current) {
-      heroFadeRef.current.style.opacity = String(clamp01(1 - p * 4.5));
+      // It used to be a flat 1 - p * 4.5, which reached zero at raw 0.222 — 77vh
+      // past the arrival of the stage captions at 0.140. So the centred lockup copy
+      // was still at 37% over "00 / 09 ENTIRE TABLE", and you could read PRECISION
+      // ENGINEERING, EXCEPTIONAL QUALITY and SCROLL TO EXPLORE straight through the
+      // table's legs. The slope predated the captions existing and only cleared the
+      // table beat at all by coincidence.
+      heroFadeRef.current.style.opacity = String(
+        1 - smoothstep(clamp01((p - COPY_FADE_START) / (COPY_FADE_END - COPY_FADE_START)))
+      );
+    }
+    // The skip control lets go once the diagram is assembled. It is an escape from
+    // the TEARDOWN, and by then the teardown is over and the beat it would sit on
+    // is the one asking to be pointed at — two competing prompts in the same corner
+    // of the same frame. Fades over the finale rather than at a threshold so it
+    // does not blink out mid-scroll, and stops taking the pointer once it is gone.
+    //
+    // Keyed on DOLLY_END, which is the finale's own end expressed on this axis —
+    // `p` here is raw scroll, not scene progress, and the two 0.8-something
+    // literals that used to be here were a guess at the conversion that landed the
+    // button 38% visible on the beat it was written to stay out of.
+    const s = skipRef.current;
+    if (s) {
+      const vis = clamp01((DOLLY_END - p) / SKIP_FADE);
+      s.style.opacity = String(vis);
+      const gone = vis < 0.05;
+      s.style.pointerEvents = gone ? 'none' : 'auto';
+      // Opacity alone leaves it in the tab order and readable to a screen reader,
+      // so the visitor on the finished diagram can still land on a control that is
+      // not on screen and be thrown back up the page by it.
+      s.style.visibility = gone ? 'hidden' : 'visible';
     }
     if (railFillRef.current) railFillRef.current.style.height = `${p * 100}%`;
     const out = readoutRef.current;
@@ -4716,6 +5305,47 @@ export default function ScrollScene({
       const digits = String(Math.round(p * 100)).padStart(3, '0');
       if (out.textContent !== digits) out.textContent = digits;
     }
+  }, []);
+
+  // Where a SKIP is heading, while it is in flight. Null the rest of the time.
+  const bypassRef = useRef<{ y: number; at: number } | null>(null);
+
+  // Past the teardown in one move, for a visitor who came here to find a phone
+  // number rather than to watch a machine come apart. The hero is 940vh; without
+  // this, "skip it" means eight beats of scrolling or hunting for the nav.
+  //
+  // It has to say so EXPLICITLY, which is the part that was wrong. The leash reads
+  // "deliberate" as "no gesture opened the chain", and `mark` is bound to
+  // touchstart — so on a phone the tap that presses this button opens a chain, the
+  // browser's smooth scroll then emits the same stream of ordinary scroll events a
+  // fling does, and the leash clamps the lot to one beat further on. Tapping SKIP
+  // advanced exactly one layer, and from the lockup it deposited the visitor INTO
+  // the teardown at walk beat 1. The same fires on a mouse whenever the click lands
+  // within GESTURE_MS of a wheel event; a quiet page and a mouse is the one case
+  // that worked, which is presumably how it was tested.
+  //
+  // So the target is recorded and the leash stands down for the whole ride — see
+  // the bypass in the scroll handler.
+  const skipTeardown = useCallback(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    let top = 0;
+    let n: HTMLElement | null = el;
+    while (n) {
+      top += n.offsetTop;
+      n = n.offsetParent as HTMLElement | null;
+    }
+    const reduced =
+      typeof window !== 'undefined' &&
+      window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    // Lands on the section AFTER the hero, not at the end of the hero — stopping on
+    // the finished diagram is not skipping, it is arriving somewhere else in the
+    // same beat.
+    const to = top + el.offsetHeight;
+    bypassRef.current = { y: to, at: performance.now() };
+    // A 940vh smooth scroll is a long ride; under the preference it is also exactly
+    // the kind of large unprompted movement being asked for less of. Cut instead.
+    window.scrollTo({ top: to, behavior: reduced ? 'instant' : 'smooth' });
   }, []);
 
   // How many pixels off the left edge the caption claims, handed to the scene so
@@ -4823,7 +5453,7 @@ export default function ScrollScene({
       if (PAGING_KEYS.has(e.key)) mark();
     };
 
-    // Which capture hold the walk last came to rest on, or null if it does not
+    // Which layer hold the walk last came to rest on, or null if it does not
     // know (before the walk, or after a jump the leash let through).
     let rest: number | null = null;
     let snapAt = 0;
@@ -4846,7 +5476,7 @@ export default function ScrollScene({
       }
       // Clamped by the leash as well: releasing must not put scroll somewhere a
       // gesture could not have taken it, or a wheel turned faster than the
-      // scene can walk would snap its way past captures the leash just refused.
+      // scene can walk would snap its way past layers the leash just refused.
       const want = Math.min(
         Math.max(scrollOfBeat(snapBeat(cur, rest)), leashFloor(d.p)),
         leashCeil(d.p)
@@ -4872,6 +5502,16 @@ export default function ScrollScene({
       raf = 0;
       const now = performance.now();
       const d = drive.current;
+      const y = window.scrollY;
+      // A SKIP in flight. The leash has to stand down for the WHOLE ride, not just
+      // for its first frame: a smooth scroll emits ordinary scroll events all the
+      // way down, and if a chain was open when the button was pressed nothing
+      // downstream would ever close it. Held until the page arrives rather than for
+      // a fixed time — see SKIP_BYPASS_MS.
+      const bypass = bypassRef.current;
+      if (bypass && (Math.abs(y - bypass.y) < 2 || now - bypass.at > SKIP_BYPASS_MS)) {
+        bypassRef.current = null;
+      }
       // A gap this long ends the chain; the next event starts a new one, which
       // is gesture-driven only if a gesture just marked it.
       if (now - lastScrollAt > GESTURE_MS) {
@@ -4880,17 +5520,22 @@ export default function ScrollScene({
         // the scene actually is. Carrying it over from the last snap instead
         // went stale the moment that snap declined to run — off view, under
         // PACE_MIN_FPS, under reduced motion — and a stale origin makes the
-        // next release step the WRONG WAY: a nudge back off capture 4 that
+        // next release step the WRONG WAY: a nudge back off layer 4 that
         // thought it started at 3 reads as +0.7 and commits forward.
         const b = beatOf(d.p);
         rest =
-          d.primed && b >= -BEAT_EPS && b <= WALK_CAPTURES + BEAT_EPS
-            ? Math.min(WALK_CAPTURES, Math.max(0, Math.round(b)))
+          d.primed && b >= -BEAT_EPS && b <= WALK_LAYERS + BEAT_EPS
+            ? Math.min(WALK_LAYERS, Math.max(0, Math.round(b)))
             : null;
       }
       lastScrollAt = now;
+      if (bypass) {
+        // Forget the gesture that opened the chain as well, so the momentum events
+        // behind it cannot re-open one the moment the bypass closes.
+        chainLive = false;
+        gestureAt = -1e9;
+      }
 
-      const y = window.scrollY;
       let p = clamp01((y - metrics.top) / metrics.span);
 
       const held = Math.min(Math.max(p, leashFloor(d.p)), leashCeil(d.p));
@@ -4976,7 +5621,7 @@ export default function ScrollScene({
     return () => mq.removeEventListener('change', apply);
   }, []);
 
-  // What the caption is naming. During the walk it is the capture on screen;
+  // What the caption is naming. During the walk it is the layer on screen;
   // during the hold beat it is whatever the visitor is pointing at, and an open
   // part outranks a hovered one so the panel does not flicker to a neighbour
   // while you reach for the close button.
@@ -5026,6 +5671,7 @@ export default function ScrollScene({
           reserveRef={reserveRef}
           reserveRightRef={reserveRightRef}
           onReady={handleReady}
+          onFailed={handleFailed}
           onLayer={handleLayer}
           onQuality={handleQuality}
           selectRef={selectRef}
@@ -5034,7 +5680,8 @@ export default function ScrollScene({
           onSelect={handleSelect}
           onInspectable={handleInspectable}
           onDiagram={handleDiagram}
-          msaa={diagram ? MSAA_BY_LEVEL[quality] : 0}
+          onSolid={handleSolid}
+          msaa={solid ? MSAA_BY_LEVEL[quality] : 0}
         />
       </Canvas>
     ),
@@ -5089,8 +5736,10 @@ export default function ScrollScene({
         {/* Accessible heading — the particle word is not readable to screen readers */}
         <h1 className="sr-only">{hero.title}</h1>
 
-        {/* Loading shimmer while the splat binary streams in */}
-        {!ready && (
+        {/* Loading shimmer while the model binary streams in. Dropped once the
+            fetch has definitively failed — a pulse that never resolves reads as a
+            broken page, and the copy underneath is the thing worth showing. */}
+        {!ready && !failed && (
           <div className="absolute inset-0 grid place-items-center">
             <div className="flex flex-col items-center gap-5">
               <div className="h-px w-32 bg-white/10 overflow-hidden">
@@ -5108,7 +5757,13 @@ export default function ScrollScene({
           ref={heroFadeRef}
           className="absolute inset-0 flex flex-col items-center justify-end pb-16 md:pb-20 pointer-events-none"
         >
-          <div className={ready ? 'animate-fade-up [animation-delay:600ms]' : 'opacity-0'}>
+          {/* Held back until the model is ready so it does not arrive over an
+              empty frame — but shown on the failure path too, where there is
+              never going to be a model and this copy is the only thing the page
+              has left to say. */}
+          <div
+            className={ready || failed ? 'animate-fade-up [animation-delay:600ms]' : 'opacity-0'}
+          >
             <p className="font-mono text-[11px] md:text-xs tracking-[0.4em] uppercase text-acid text-center mb-4">
               {hero.eyebrow}
             </p>
@@ -5118,7 +5773,7 @@ export default function ScrollScene({
           </div>
           <div
             className={`mt-10 flex flex-col items-center gap-3 ${
-              ready ? 'animate-fade-up [animation-delay:1200ms]' : 'opacity-0'
+              ready || failed ? 'animate-fade-up [animation-delay:1200ms]' : 'opacity-0'
             }`}
           >
             <span className="font-mono text-[10px] tracking-[0.35em] uppercase text-mute">
@@ -5128,11 +5783,28 @@ export default function ScrollScene({
           </div>
         </div>
 
-        {/* Capture caption — names the subassembly currently on screen, and the
+        {/* Skip the teardown. Outside the hero-copy overlay above, which fades out
+            within the first fifth of the page — this has to stay reachable for the
+            whole walk, which is the part being offered an escape from. Bottom
+            right: the caption owns the left, the rail owns the middle right, and
+            the inspect prompt owns the bottom left. */}
+        <button
+          ref={skipRef}
+          type="button"
+          onClick={skipTeardown}
+          className="group absolute bottom-8 right-6 z-20 flex items-center gap-2 px-3 py-2 font-mono text-[10px] uppercase tracking-[0.3em] text-mute transition-colors hover:text-acid focus-visible:text-acid focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-acid/60 md:bottom-10 md:right-8"
+        >
+          {hero.skip}
+          <span aria-hidden className="transition-transform group-hover:translate-y-0.5">
+            ↓
+          </span>
+        </button>
+
+        {/* Stage caption — names the subassembly currently on screen, and the
             drawing once the teardown resolves into it. Sits on the left, clear
             of the model, and swaps at the midpoint of each removal: the outgoing
             part is halfway out of frame and the incoming one is still resolving,
-            so the label never changes over a settled capture. */}
+            so the label never changes over a settled layer. */}
         <div
           // Vertically centred beside the model on wide screens; on a phone the
           // model fills the middle, so the caption drops to the lower third

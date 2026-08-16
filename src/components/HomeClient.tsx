@@ -313,12 +313,13 @@ function ContactSection() {
 export default function HomeClient() {
   const t = useTranslations();
 
-  // One caption per capture in the hero's teardown, in the order the scene steps
+  // One caption per beat of the hero's teardown, in the order the scene steps
   // through them (00 the whole table, then each subassembly as it is removed),
   // plus a last one for the exploded diagram the walk resolves into. The scene
-  // reports which capture is on screen, so this array is indexed by that
-  // directly — the first nine must match the capture count in
-  // public/models/layers-index.bin, and the tenth is the closing beat.
+  // reports which beat is on screen, so this array is indexed by that directly:
+  // its length must be nLayer in public/models/cad-layers-index.bin plus two, one
+  // for the assembled table at the front and one for the diagram at the back.
+  // ScrollScene warns in development if it is not.
   const stages = Array.from({ length: 10 }, (_, i) => ({
     title: t(`scroll_scene.layer${i}_title`),
     text: t(`scroll_scene.layer${i}_text`),
@@ -332,6 +333,7 @@ export default function HomeClient() {
           eyebrow: t('hero.eyebrow'),
           subtitle: t('hero.subtitle'),
           scrollHint: t('hero.scroll_hint'),
+          skip: t('hero.skip'),
           loading: t('hero.loading'),
         }}
         stages={stages}
