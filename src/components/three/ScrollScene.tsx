@@ -57,13 +57,25 @@ const PIXEL_BUDGET_MOBILE = 1_100_000;
 const DPR_CAP_DESKTOP = 2;
 const DPR_CAP_MOBILE = 1.75;
 
-// The closing diagram gets its own, far larger budget, because it is not the
-// pass any of the above was measured on. Everything in that block is about
-// alpha-blended gaussians many layers deep; the CAD is opaque geometry with
-// early-z, one draw call a shape — and by the time it owns the frame the splat
-// mesh is not drawn at all (see splatsGone). Charging a fill-rate budget to a
-// pass that is not fill-bound, in exchange for nothing, is what the desktop
-// number was doing here.
+// Solid geometry gets its own, far larger budget, because it is not the pass any
+// of the above was measured on. Everything in that block is about alpha-blended
+// gaussians many layers deep; the CAD is opaque geometry with early-z, one draw
+// call a shape — and wherever it owns the frame the splat mesh is not drawn at
+// all (see splatsGone). Charging a fill-rate budget to a pass that is not
+// fill-bound, in exchange for nothing, is what the desktop number was doing here.
+//
+// This used to be the CLOSING DIAGRAM's budget, keyed to the `diagram` flag, and
+// that is the second half of the bug that left the teardown aliased. Edge quality
+// has two levers — sample count and render scale — and both were keyed to a flag
+// that does not come up until the last 9% of the page. Fixing only the sample
+// count fixed only half of it: the walk still drew at the gaussian budget, which
+// on a 1440x900 dpr-2 panel is 0.61x native linear, and no number of samples
+// rescues an image the browser then upscales by 1.6x. It is keyed to `solid` now,
+// the same threshold the multisampling uses and the same one that stops drawing
+// the cloud, so the two levers cannot disagree about which pass they are sizing.
+//
+// It costs one buffer reallocation FEWER, not one more. The switch used to happen
+// at the diagram; it now happens at SOLID_END and the diagram inherits it.
 //
 // And it was not a small tax. On a 1440x900 CSS box at devicePixelRatio 2 the
 // old budget resolves to 1.21, so the diagram rendered at 1742x1089 and the
@@ -94,19 +106,46 @@ const DPR_CAP_MOBILE = 1.75;
 //
 // The multisample cost is per PIXEL — clear four samples, resolve four samples —
 // so it scales with this number, and buying resolution buys it four times over.
-// 3.4 Mpx is 0.81x native on that panel: against the 4.8 Mpx frame, mean gradient
-// magnitude over a detail crop falls 4% (5.70 -> 5.48, i.e. that much softer) for
-// 33% of the frame back. Dropping MSAA instead would be cheaper still and is the
-// wrong trade — it is the one that puts the stair-steps back.
+// Dropping MSAA instead would be cheaper still and is the wrong trade — it is the
+// one that puts the stair-steps back.
+//
+// It sat at 3.4 Mpx on the strength of the middle rows: 0.81x native on THAT
+// panel, giving up 4% of mean gradient magnitude over a detail crop (5.70 ->
+// 5.48) for 33% of the frame back. Two things were wrong with reading it that
+// way. The panel it was fitted to is the small one — a 1440x900 dpr-2 laptop is
+// 5.2 Mpx native, but the 1728x1080 default on a current MacBook is 7.5 Mpx, so
+// the same budget lands at 0.67x native there and worse on anything larger, which
+// is upscaling by half again. And mean gradient magnitude is the wrong instrument
+// for this: it averages over a crop, so it barely moves when a long near-straight
+// silhouette breaks into steps — which is the thing you actually see, and the
+// thing this machine is made of.
+//
+// So the ceiling is now roughly native for an ordinary hidpi laptop, and it is
+// the GOVERNOR's job to take it back from a device that cannot hold it. That is
+// the mechanism that already exists for exactly this, it acts in about a second,
+// and its first rung lands at 3.8 Mpx — near enough the old value that a device
+// which really did need 3.4 Mpx gets there on its own, with evidence, instead of
+// every device being held there on one machine's behalf.
 //
 // Still a budget rather than "just use devicePixelRatio" for the 4K panel the
 // note above was measured on, where native is 12.9 Mpx and no amount of early-z
 // makes a million triangles free. Phones are unaffected — they already sit at
-// their cap. And the governor rides on top: its rungs land this at 2.9 / 2.4 /
-// 2.0 Mpx, and drop the sample count before either.
-const PIXEL_BUDGET_DIAGRAM = 3_400_000;
+// their cap. And the governor rides on top: its rungs land this at 3.8 / 2.7 /
+// 2.0 / 1.4 Mpx, and drop the sample count before either.
+//
+// Those are SQUARES of the rung, not the rung — GOV_DPR scales a device pixel
+// ratio and the buffer is two-dimensional. The figures this note used to carry
+// (2.9 / 2.4 / 2.0) were the linear ones and overstated every rung.
+//
+// Resolution is not only the aliasing lever here, which is why it is worth this
+// much. The fragment shader's specular antialiasing widens roughness by the
+// screen-space VARIANCE of the normal, and variance falls with the square of the
+// render scale — so at the gaussian budget that term saturated its own clamp
+// across most of the machine and every chrome bearing and brushed plate on the
+// teardown was being drawn at plaster roughness. Same number, two defects.
+const PIXEL_BUDGET_SOLID = 5_200_000;
 
-function baseDpr(diagram = false) {
+function baseDpr(solid = false) {
   if (typeof window === 'undefined') return 1;
   const w = window.innerWidth;
   const h = window.innerHeight;
@@ -114,8 +153,8 @@ function baseDpr(diagram = false) {
   const cap = Math.min(window.devicePixelRatio || 1, small ? DPR_CAP_MOBILE : DPR_CAP_DESKTOP);
   const budget = small
     ? PIXEL_BUDGET_MOBILE
-    : diagram
-      ? PIXEL_BUDGET_DIAGRAM
+    : solid
+      ? PIXEL_BUDGET_SOLID
       : PIXEL_BUDGET_DESKTOP;
   const fit = Math.sqrt(budget / Math.max(1, w * h));
   return Math.min(cap, Math.max(1, fit));
@@ -1539,12 +1578,14 @@ void main() {
   float rough = clamp(vMra.y, ${glf(CAD_ROUGH_MIN)}, 1.0);
   float ao = mix(1.0, vMra.z, uAo);
 
-  // Geometric specular antialiasing. A chrome bearing at 0.06 roughness has a
-  // highlight far narrower than a pixel on decimated geometry, so it strobes as
-  // the diagram turns. Widening roughness by the normal's screen-space variance
-  // spreads that highlight to at least a pixel, which is what the canvas cannot
-  // do for us — MSAA is off, since soft gaussians cannot alias and the splat pass
-  // is the one that has to stay cheap.
+  // Geometric specular antialiasing, and it is NOT made redundant by the
+  // multisampling that now covers this pass. MSAA anti-aliases coverage: it takes
+  // more samples of the silhouette and shades each covered pixel once. A chrome
+  // bearing at 0.06 roughness has a highlight far narrower than a pixel on
+  // decimated geometry, and that highlight strobes in the SHADING of pixels the
+  // silhouette never touches, which no amount of coverage sampling can see.
+  // Widening roughness by the normal's screen-space variance spreads it to at
+  // least a pixel. Two different aliases, two different fixes, both needed.
   vec3 dnx = dFdx(n);
   vec3 dny = dFdy(n);
   float variance = 0.5 * (dot(dnx, dnx) + dot(dny, dny));
@@ -1555,7 +1596,9 @@ void main() {
   // perforated tracks, rings of small rollers, gear teeth — that the variance term
   // saturates over most of the model at anything short of full display resolution.
   // Every metal in the diagram was therefore being drawn at plaster roughness,
-  // which is exactly the "no specular anywhere" the closing shot had.
+  // which is exactly the "no specular anywhere" the closing shot had. The teardown
+  // had it worse and for longer, because it was rendering at the gaussian budget
+  // until PIXEL_BUDGET_SOLID was keyed to the geometry instead of to the beat.
   //
   // The shipped value is the usual working range for this approximation and still
   // covers what it is for: a chrome bearing at roughness 0.06 has alpha 0.0036, so
@@ -2936,7 +2979,6 @@ function SplatCloud({
   onHover,
   onSelect,
   onInspectable,
-  onDiagram,
   onSolid,
 }: {
   text: string;
@@ -2971,9 +3013,6 @@ function SplatCloud({
   // Whether the diagram is currently accepting a pointer at all, so the host can
   // show the prompt and the rail only when they mean something.
   onInspectable?: (v: boolean) => void;
-  // Whether the CAD diagram owns the frame, so the host can hand it the render
-  // scale the splat budget was holding back. See PIXEL_BUDGET_DIAGRAM.
-  onDiagram?: (v: boolean) => void;
   // Whether the frame is solid geometry with no particle pass over it, which
   // is what decides multisampling. See the note beside ins.solid.
   onSolid?: (v: boolean) => void;
@@ -3135,6 +3174,18 @@ function SplatCloud({
   // The level-0 ellipse cap, kept so the governor's rungs can scale it with the
   // render scale they set. Filled in when the material is built.
   const maxAxis0 = useRef(0);
+  // Throw away everything the governor has learned and let it climb again. A
+  // probe measured on one pass is not evidence about another, and a device that
+  // concluded "resolution is not my problem" on the cheap pass would otherwise
+  // carry that verdict — and its pinned floor — into the expensive one. Called on
+  // the page's two real changes of pass, so at most twice a visit.
+  const reprobe = useCallback(() => {
+    const gv = gov.current;
+    gv.floor = GOV_MAX_LEVEL;
+    gv.probe = 0;
+    gv.bad = 0;
+    gv.good = 0;
+  }, []);
 
   useEffect(() => {
     reducedMotion.current =
@@ -3681,22 +3732,22 @@ function SplatCloud({
       if (solid !== ins.solid) {
         ins.solid = solid;
         onSolid?.(solid);
+        // THIS is the page's real change of pass, and it is where the reprobe
+        // belongs: the render scale jumps to the solid budget and multisampling
+        // arrives with it, on the same frame, both keyed to this flag. Everything
+        // measured over the cloud was measured on a fill-bound alpha pass that is
+        // about to stop being drawn at all.
+        reprobe();
       }
       const owns = ins.diagram ? fe > 0.15 : fe >= FINALE_HANDOVER;
       if (owns !== ins.diagram) {
         ins.diagram = owns;
-        onDiagram?.(owns);
-        // A probe measured on one pass is not evidence about another, and this is
-        // the page's one real change of pass: the render scale jumps to the
-        // diagram's own budget and 4x multisampling arrives with it. A device
-        // that learned "resolution is not my problem" while scrubbing the walk
-        // would otherwise carry that verdict into the single most expensive beat
-        // there is. Cheap because it happens twice a page at most.
-        const gv = gov.current;
-        gv.floor = GOV_MAX_LEVEL;
-        gv.probe = 0;
-        gv.bad = 0;
-        gv.good = 0;
+        // Kept, but for a different reason than it was written for. The diagram
+        // no longer changes the render scale or the sample count — it inherits
+        // both from `solid` — but it does put every layer on screen at once,
+        // pulled apart, where the walk holds at most a few. Same pixels, more
+        // geometry through them.
+        reprobe();
       }
     }
     if (!pickable && ins.hot >= 0) {
@@ -4992,7 +5043,6 @@ function Scene({
   onHover,
   onSelect,
   onInspectable,
-  onDiagram,
   onSolid,
   msaa,
 }: {
@@ -5013,12 +5063,11 @@ function Scene({
   onHover?: (i: number) => void;
   onSelect?: (i: number) => void;
   onInspectable?: (v: boolean) => void;
-  onDiagram?: (v: boolean) => void;
   // Whether the frame is solid geometry with no particle pass over it, which
   // is what decides multisampling. See the note beside ins.solid.
   onSolid?: (v: boolean) => void;
-  // Multisampling for the closing diagram: whether it owns the frame, and how
-  // many samples the governor's current rung allows. See DiagramMsaa.
+  // Multisampling: whether the frame is solid geometry at all, and how many
+  // samples the governor's current rung allows. See DiagramMsaa.
   msaa: number;
 }) {
   // Shared between the three frame loops below, never rendered into React. See
@@ -5043,7 +5092,6 @@ function Scene({
         onHover={onHover}
         onSelect={onSelect}
         onInspectable={onInspectable}
-        onDiagram={onDiagram}
         onSolid={onSolid}
       />
       <BackgroundParticles progressRef={progressRef} idle={idle} />
@@ -5108,25 +5156,22 @@ export default function ScrollScene({
   // is the pixel budget, re-measured on resize so dragging the window to another
   // monitor re-fits it.
   const [quality, setQuality] = useState(0);
-  // Whether the closing diagram owns the frame. It gets a much larger pixel
-  // budget than the rest of the hero, so this is an input to the render scale
-  // rather than only a piece of presentation state — see PIXEL_BUDGET_DIAGRAM.
-  const [diagram, setDiagram] = useState(false);
-  // Whether the frame is solid geometry, which is what multisampling follows.
-  // Deliberately NOT `diagram`: that flag exists for the closing beat's pixel
-  // budget and comes up in the last 9% of the page, and keying anti-aliasing to it
-  // is what left the entire 468vh walk aliased. See ins.solid.
+  // Whether the frame is solid geometry with no particle pass over it. BOTH edge
+  // quality levers hang off this one flag — the sample count and the pixel budget
+  // — because they are sizing the same pass and must not be able to disagree
+  // about which one it is. Keying them to `diagram` instead, which does not come
+  // up until the last 9% of the page, is what left the entire 468vh walk aliased.
+  // See ins.solid.
   const [solid, setSolid] = useState(false);
   const [dprBase, setDprBase] = useState(() => baseDpr());
   const handleQuality = useCallback((level: number) => setQuality(level), []);
-  const handleDiagram = useCallback((v: boolean) => setDiagram(v), []);
   const handleSolid = useCallback((v: boolean) => setSolid(v), []);
   useEffect(() => {
-    const fit = () => setDprBase(baseDpr(diagram));
+    const fit = () => setDprBase(baseDpr(solid));
     fit();
     window.addEventListener('resize', fit, { passive: true });
     return () => window.removeEventListener('resize', fit);
-  }, [diagram]);
+  }, [solid]);
   // Same fact the frameloop is gated on, readable from the scroll handler. It
   // matters there: out of view the canvas stops and the spring FREEZES, so a
   // leash that trusted a stale `drive.p` would pin the visitor inside a hero
@@ -5679,7 +5724,6 @@ export default function ScrollScene({
           onHover={handleHover}
           onSelect={handleSelect}
           onInspectable={handleInspectable}
-          onDiagram={handleDiagram}
           onSolid={handleSolid}
           msaa={solid ? MSAA_BY_LEVEL[quality] : 0}
         />
@@ -5689,7 +5733,15 @@ export default function ScrollScene({
       inView,
       dprBase,
       quality,
-      diagram,
+      // `solid` and not `diagram`, which is what the body actually reads and had
+      // drifted out of sync with it. This list is the ONLY thing that gets the
+      // sample count onto the canvas — the whole point of the memo is that this
+      // subtree does not re-render for anything else — so a missing dependency
+      // here is not a stale-closure smell, it is anti-aliasing that arrives
+      // whenever some unrelated state happens to change next, or never. It
+      // survived the last fix because `dprBase` moved on the governor's rungs and
+      // dragged the memo along with it.
+      solid,
       hero.title,
       handleReady,
       handleLayer,
