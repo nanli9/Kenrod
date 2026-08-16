@@ -533,8 +533,6 @@ const FINALE_END = WALK_END + SCROLL_SPAN * B_FINALE;
 // pointing at the empty corner beside the turntable still picks the turntable.
 // That reads as forgiving rather than as a miss.
 const INSPECT_AT = 0.98; // `fe` past which the diagram accepts a pointer
-// How fast the isolation blend and the orbit follow. Both are dampings per
-// second, not per frame — see damp().
 // What the wordmark must stay clear of, in CSS px off each edge of the viewport.
 // The top is the fixed nav plus its own gradient; the bottom is the hero copy
 // block, which is bottom-anchored (pb-16/pb-20) and runs eyebrow, subtitle, then
@@ -545,8 +543,85 @@ const INSPECT_AT = 0.98; // `fe` past which the diagram accepts a pointer
 const LOCKUP_BAND_TOP = 96;
 const LOCKUP_BAND_BOTTOM = 248;
 
+// How fast an abandoned orbit unwinds, and how fast the orbit itself follows the
+// pointer. Dampings per second, not per frame — see damp(). The isolation blend
+// used to be one of these and is no longer; it is a spring, for the reasons at
+// FOCUS_OMEGA below.
 const FOCUS_RATE = 6;
 const ORBIT_RATE = 9;
+// How the FRAMING travels when the subject changes — the click that opens a part,
+// and every step through the stack after it. A critically damped spring rather
+// than the exponential the rest of the isolation runs on, and the difference is
+// most of what was wrong with stepping between parts.
+//
+// The parts differ by 3x in radius and sit metres apart on the explode axis, so a
+// step is a real camera move: rescale, and travel. Run on damp() that move began
+// at its maximum speed on the frame the wheel fired and ended on a half-second
+// creep — it lurched off the old part and oozed onto the new one. A spring leaves
+// from rest and settles, and it carries velocity through a target change, so
+// stepping twice quickly flows through the second part instead of stopping dead
+// at the first and starting again.
+const FOCUS_OMEGA = 9; // rad/s, critically damped: settles in ~0.65s
+// ---------------------------------------------------------------- the swap
+// Changing which part is isolated is a DISSOLVE, not a cross-fade.
+//
+// It was a cross-fade: the outgoing part's alpha ran 1 -> 0 while the incoming
+// one ran 0 -> 1 on the same exponential, so the middle of every step was two
+// half-transparent machines lying on top of each other, and neither of them was
+// the thing you were trying to look at.
+//
+// The page already owns a better answer and spends 468vh establishing it — the
+// teardown's per-fragment dissolve, which evaporates SURFACES while the detail
+// channel holds, so a part opens into a tracery of its own edges on the way out.
+// Driving the isolation through that same uniform needs no new shader, no new
+// material, no new pass and no new state beyond one number per layer, and it means
+// stepping through the stack is spoken in the same language as the teardown that
+// got you to it.
+const SWAP_S = 0.38; // seconds for one layer to evaporate, or to re-form
+// How much of the outgoing part may still be standing when the incoming one starts
+// forming. SEQUENCED rather than simultaneous — that is what stops it collapsing
+// back into a cross-fade — but overlapped, because a gap between the two reads as
+// a blink.
+//
+// The lead is short, and the number was arrived at by arithmetic rather than by
+// taste, because it decides how EMPTY the middle of a step gets. The two dissolves
+// travel the same range in opposite directions, so they cross at (1 + this) / 2 —
+// and since the shader discards in proportion to the sweep, that crossing value is
+// what fraction of each part has evaporated at the thinnest moment of the frame.
+//
+//   lead 0.55 (tried first): cross at 0.89 —  11% of each part left,  22% total
+//   lead 0.25 (this):        cross at 0.70 —  30% of each part left,  60% total
+//
+// Traced at 0.55 and the frame really did go nearly empty for 60ms in the middle of
+// every step, which is a blink, not a transition. At 0.25 the outgoing part still
+// visibly leads — six frames of it alone before the new one draws a triangle, which
+// is what says "this one is going" before "this one is coming" — and the crossing
+// holds two thirds of a machine's worth of edges.
+//
+// Two dissolves at 70% is nothing like the cross-fade this replaced. A dissolve
+// leaves opaque, correctly depth-sorted fragments and takes the rest away; an alpha
+// at the same number leaves you looking through both parts at once.
+const SWAP_HANDOFF = 0.75;
+// The breath. A step is a camera changing subject, and a camera that changes
+// subject widens, travels, and closes again — so the isolation framing relaxes
+// this far back toward the whole-diagram fit while the swap is in flight and takes
+// it back as the new part settles. Deliberately small: enough that the move reads
+// as a move, not enough to show the rest of the stack, which is the thing the
+// isolation exists to get out of the way.
+const SWAP_PULL = 0.13;
+// And it turns, slightly, the way you stepped. ~4.6 degrees out and back, under a
+// tenth of what a drag of the same duration would do. It is the only part of the
+// step that says WHICH DIRECTION you went — without it, forward and back are the
+// same picture — and a few degrees of yaw against a lit metal part is also the
+// cheapest parallax there is.
+const SWAP_SWING = 0.08; // radians
+// The envelope both of those ride. A spring chasing a square pulse: it rises while
+// the swap is in flight and decays after it, so the widen-and-turn peaks near the
+// middle of the move and is gone by the time the new part is solid. A spring
+// rather than a sin() over an explicit clock because it is re-entrant for free —
+// stepping again mid-swap extends the pulse and reverses the turn smoothly, where
+// a clock would have to be reset and would snap.
+const SWAP_OMEGA = 8;
 // Ceiling on the focus zoom, as a MULTIPLE of the whole-diagram framing rather
 // than an absolute scale. The layers differ by 3x in radius (the cabinet is the
 // whole table, the electronics box is a third of it), so an absolute cap would
@@ -634,7 +709,13 @@ const CYCLE_WHEEL_REPEAT = 520;
 // flicks.
 const CYCLE_GESTURE_GAP_MS = 140;
 const CYCLE_SWIPE = 60; // px of vertical drag for one step
-const CYCLE_COOLDOWN_MS = 340; // ~ the isolation cross-fade, so each part lands
+// Long enough that the outgoing part is gone and the incoming one is well into
+// forming before another step can be asked for. It is NOT the full length of a
+// swap (SWAP_S plus its handoff lead, ~0.63s): the swap is re-entrant by
+// construction, so a visitor who genuinely wants to move two parts should be able
+// to, and holding the wheel hostage for two thirds of a second to enforce a
+// transition they can already see reads as the page being stuck.
+const CYCLE_COOLDOWN_MS = 420;
 // The end of the finale on the axis the spring works in (`smooth` — progress with
 // the intro's fixed share divided back out), which is what the camera dolly and
 // anything else driven off the spring rather than off `p` has to stop at.
@@ -673,6 +754,14 @@ function easeInCubic(t: number) {
 function smoothstep(t: number) {
   return t * t * (3 - 2 * t);
 }
+// Zero VELOCITY and zero ACCELERATION at both ends, where smoothstep only zeroes
+// the velocity. Used where the eye is watching one thing travel the whole way and
+// has time to notice the kick at the start — the isolation dissolve is the case,
+// because a dissolve front is a spatial edge sweeping a surface and any jerk in it
+// is legible as the edge itself changing speed.
+function smootherstep(t: number) {
+  return t * t * t * (t * (t * 6 - 15) + 10);
+}
 
 // A subject's half-height ON SCREEN under a pitch: its own height foreshortened by
 // the tilt, plus the share of its plan extent the tilt swings into vertical. Both
@@ -702,6 +791,50 @@ function damp(x: number, target: number, rate: number, dt: number) {
   // world units where 1 unit is about 100 px, so this threshold is well under
   // a hundredth of a pixel.
   return Math.abs(v - target) < 1e-4 ? target : v;
+}
+
+// The remaining error a spring is allowed to give up on. Everything sprung here is
+// either a 0..1 blend or a world length, and at the isolated framing one world unit
+// is a few hundred pixels — so this is a fifth of a pixel of travel STILL TO COME,
+// which is the honest bound, because a critically damped spring's remaining error
+// is also the furthest it can still move.
+//
+// It is twenty times damp()'s, and the difference is worth the line. An exponential
+// approach at rate 6 is inside 1e-4 of its target in about 1.6s; a spring's tail is
+// (1 + wt)e^-wt, which at w = 9 takes 1.5s to reach 1e-4 but only 0.94s to reach
+// this — and every frame of that difference is a frame the idle check sees as
+// motion and re-renders 250k triangles for. Measured on one step through the stack:
+// the visible move is over in 0.64s and the old threshold went on drawing for 1.70s.
+const SPRING_EPS = 2e-3;
+type Spring = { x: number; v: number };
+// Critically damped spring — the same semi-implicit integrator driveScroll uses,
+// which is unconditionally stable and cannot overshoot. `s` carries the position
+// and its velocity; the return is the new position.
+//
+// Where damp() is right for a value chasing something that moves every frame (the
+// pointer, the hover), this is right for a value sent to a NEW REST STATE: damp's
+// velocity is maximum on the frame the target changes and only ever decays, so it
+// leaves at a jerk and arrives on an infinite creep. A spring starts from rest,
+// accelerates into the move and decelerates out of it, and — the part that matters
+// when a visitor steps twice quickly — it carries the velocity it already had
+// through the new target instead of stopping dead and starting again.
+function spring(s: Spring, target: number, w: number, dt: number) {
+  const h = Math.min(dt, 0.05);
+  s.v = (s.v - w * w * h * (s.x - target)) / (1 + 2 * w * h + w * w * h * h);
+  s.x += h * s.v;
+  // ARRIVE, for exactly the reason damp() does: the idle check downstream is an
+  // exact comparison of this frame's scene against the last one, and a spring still
+  // settling in the fourth decimal place re-renders a million triangles for nothing.
+  // Both terms are required. From rest a critical spring cannot overshoot, so being
+  // near the target would be enough — but a target CHANGED mid-flight leaves it
+  // carrying velocity, and then near-the-target can be a crossing at speed rather
+  // than an arrival. The velocity bound is the speed that would carry it one more
+  // epsilon in a time constant.
+  if (Math.abs(s.x - target) < SPRING_EPS && Math.abs(s.v) < SPRING_EPS * w) {
+    s.x = target;
+    s.v = 0;
+  }
+  return s.x;
 }
 
 // One critically damped spring drives the whole scene's scroll. Two independent
@@ -1164,7 +1297,11 @@ type CadLayer = {
   // than in a parallel array so there is exactly one thing to keep in step, and
   // damped rather than set so hover does not pop.
   hot: number; // 0..1 highlight
-  alpha: number; // 0..1 isolation opacity, independent of the landing fade
+  alpha: number; // 0..1 drawn-at-all gate, derived from `dis` below
+  // How evaporated this layer is for the ISOLATION, 0 formed to 1 gone. Fed into
+  // the same uPeel the teardown sweeps, and moved at a fixed rate rather than
+  // damped so it lands exactly and in a bounded time. See the SWAP_* constants.
+  dis: number;
 };
 
 // --------------------------------------------------- the shared shading numbers
@@ -2286,8 +2423,8 @@ function parseCadLayers(ab: ArrayBuffer, indexAb: ArrayBuffer): CadLayer[] | nul
       //
       // And the case it was supposed to rescue does not need rescuing. Isolating a
       // part already culls at the LAYER, which is a coarser test than the frustum
-      // and a far more effective one: c.alpha damps to zero on every layer but the
-      // chosen one, root.visible follows it, and the whole subtree stops being
+      // and a far more effective one: every layer but the chosen one dissolves to
+      // nothing, root.visible follows it, and the whole subtree stops being
       // walked. Measured on the focused belt view: 35 draw calls and 247k triangles
       // a frame against 122 and 1,097k unfocused. Frustum culling has nothing left
       // to find there, and what it could find elsewhere it cannot see, because the
@@ -2439,6 +2576,7 @@ function parseCadLayers(ab: ArrayBuffer, indexAb: ArrayBuffer): CadLayer[] | nul
       planR: Math.max(0.001, planR),
       hot: 0,
       alpha: 1,
+      dis: 0,
     });
   }
 
@@ -3278,7 +3416,11 @@ function SplatCloud({
   // re-reconciles the whole scene tree.
   const inspect = useRef({
     hot: -1, // layer the pointer is over, -1 for none
-    focus: 0, // 0..1 isolation blend, damped toward "is something selected"
+    // 0..1 isolation blend, sprung toward "is something selected". A spring for
+    // the same reason the framing below is one: this is the OPEN and CLOSE flight,
+    // and on an exponential it left the diagram at full speed and crept into the
+    // part. Critically damped, so it cannot overshoot past either end.
+    focus: { x: 0, v: 0 } as Spring,
     live: false, // is the diagram accepting a pointer at this scroll position
     diagram: false, // is the CAD the only thing drawing, i.e. can it have the pixels
     // Whether the frame is SOLID GEOMETRY and nothing else. Separate from
@@ -3296,11 +3438,21 @@ function SplatCloud({
     // framing off that would snap the fit back to the whole stack in one frame
     // while the isolation blend was still easing out of it.
     lastSel: -1,
-    // Damped framing for the isolated part: its radius, its own centre height and
-    // its seat. See the block that drives them for why they are not read live.
-    fitR: 0,
-    cenY: 0,
-    seat: 0,
+    // The framing of the isolated part: its radius, its own centre height and its
+    // seat, each a critically damped SPRING rather than a bare number. See the
+    // block that drives them for why they are not read live off the selection, and
+    // FOCUS_OMEGA for why they are springs and not exponentials.
+    fitR: { x: 0, v: 0 } as Spring,
+    cenY: { x: 0, v: 0 } as Spring,
+    seat: { x: 0, v: 0 } as Spring,
+    // The swap envelope: -1..1, signed by the direction of the last step and
+    // springing toward zero whenever nothing is in flight. Drives the small widen
+    // and the small turn that make a step read as a camera move. See SWAP_OMEGA.
+    swirl: { x: 0, v: 0 } as Spring,
+    swapDir: 1,
+    // Whether the isolation is stepping between parts, as opposed to opening onto
+    // one or closing off it. Only a step gets the envelope above.
+    swapping: false,
     // Where the current press started, so pointerup can tell a click from a drag.
     downX: 0,
     downY: 0,
@@ -3927,9 +4079,8 @@ function SplatCloud({
     // Reduced motion gets the same states, reached by a cut rather than a flight.
     // A part sailing across the frame and scaling up is precisely the kind of
     // large unprompted movement the preference is asking us not to make.
-    const focRate = reducedMotion.current ? 60 : FOCUS_RATE;
-    ins.focus = damp(ins.focus, sel >= 0 ? 1 : 0, focRate, dtc);
-    const foc = ins.focus;
+    const focOmega = reducedMotion.current ? 60 : FOCUS_OMEGA;
+    const foc = spring(ins.focus, sel >= 0 ? 1 : 0, focOmega, dtc);
     // Orbit decays back to the scripted framing as the isolation lets go, so
     // returning to the diagram and picking a second part starts it square rather
     // than wherever the last one was left.
@@ -3939,6 +4090,20 @@ function SplatCloud({
     }
     ins.yaw = damp(ins.yaw, ins.yawTo, ORBIT_RATE, dtc);
     ins.pitch = damp(ins.pitch, ins.pitchTo, ORBIT_RATE, dtc);
+    // Which way the stack was just stepped, latched before lastSel is overwritten.
+    // Signed SHORTEST path around the ring, so wrapping 08 -> 01 turns the way it
+    // looks like it turns rather than winding seven parts backwards — and so a rail
+    // click, which can jump any distance, still says something true about direction.
+    if (sel >= 0 && ins.lastSel >= 0 && sel !== ins.lastSel && cad) {
+      const n = cad.length;
+      ins.swapDir = ((sel - ins.lastSel + n / 2 + 2 * n) % n) - n / 2 >= 0 ? 1 : -1;
+      // Only a SUBJECT CHANGE with the isolation already up is a swap. Opening from
+      // the assembled diagram clears seven layers too, but that is a push-in and
+      // must not get the widen — a camera that pulls back on its way into a part is
+      // a counter-move — nor the turn, whose direction would be whatever the last
+      // step happened to leave behind.
+      ins.swapping = true;
+    }
     if (sel >= 0) ins.lastSel = sel;
     else if (foc < 0.002) ins.lastSel = -1;
     // The subject the framing is fitted to while the isolation is up. Null both
@@ -3947,37 +4112,80 @@ function SplatCloud({
     const focGeo =
       finale && ins.lastSel >= 0 && foc > 0.002 ? (finale.per[ins.lastSel] ?? null) : null;
     const focLayer = focGeo && cad ? (cad[ins.lastSel] ?? null) : null;
-    // The framing of the isolated part, damped rather than read straight off the
-    // selection — because scrolling now steps from one part to the next without
-    // ever closing, and the parts differ by 3x in size and sit metres apart on
-    // the explode axis. Taken live, every step would cut the scale and the
-    // centring in one frame; damped, the frame travels to the next part while it
-    // fades up, which is what makes the walk through the stack read as one move.
+    // The framing of the isolated part, sprung rather than read straight off the
+    // selection — because scrolling steps from one part to the next without ever
+    // closing, and the parts differ by 3x in size and sit metres apart on the
+    // explode axis. Taken live, every step would cut the scale and the centring in
+    // one frame; sprung, the frame TRAVELS to the next part while it forms, which
+    // is what makes stepping through the stack read as one move.
     //
-    // Radius and seat are damped; the PITCH they are combined with below is not.
-    // The fit must not move while the visitor turns a part, but the centring must
-    // — tipping a part a quarter turn otherwise slides it off the middle of the
-    // frame by its own half-height.
+    // Radius and seat move; the PITCH they are combined with below does not. The
+    // fit must not move while the visitor turns a part, but the centring must —
+    // tipping a part a quarter turn otherwise slides it off the middle of the frame
+    // by its own half-height.
     if (focGeo && focLayer) {
-      if (ins.fitR <= 0) {
-        ins.fitR = focGeo.fitR;
-        ins.cenY = focLayer.centreY;
-        ins.seat = focLayer.seatY;
+      if (ins.fitR.x <= 0) {
+        // First open of the visit: seat the springs rather than fly them in from
+        // zero, which would start the isolation at infinite magnification.
+        ins.fitR.x = focGeo.fitR;
+        ins.cenY.x = focLayer.centreY;
+        ins.seat.x = focLayer.seatY;
+        ins.fitR.v = 0;
+        ins.cenY.v = 0;
+        ins.seat.v = 0;
       } else {
-        ins.fitR = damp(ins.fitR, focGeo.fitR, focRate, dtc);
-        ins.cenY = damp(ins.cenY, focLayer.centreY, focRate, dtc);
-        ins.seat = damp(ins.seat, focLayer.seatY, focRate, dtc);
+        spring(ins.fitR, focGeo.fitR, focOmega, dtc);
+        spring(ins.cenY, focLayer.centreY, focOmega, dtc);
+        spring(ins.seat, focLayer.seatY, focOmega, dtc);
       }
     } else if (foc < 0.002) {
-      ins.fitR = 0;
+      ins.fitR.x = 0;
+      ins.fitR.v = 0;
     }
+
+    // How much of a layer that should NOT be on screen still is, taken from last
+    // frame's dissolves. One number over eight layers, and it does two jobs: it
+    // gates when the incoming part may start forming (SWAP_HANDOFF) and it is the
+    // pulse the swap envelope chases. One frame stale, which nothing can see.
+    //
+    // Defined against what is UNWANTED rather than against what is arriving, which
+    // is what makes closing work: at sel < 0 every layer is wanted, so this is zero
+    // and all eight re-form at once instead of waiting on each other forever.
+    let held = 0;
+    if (cad && sel >= 0) {
+      for (let ci = 0; ci < cad.length; ci++) {
+        if (ci !== sel) held = Math.max(held, 1 - cad[ci].dis);
+      }
+    }
+    if (held <= 0.02) ins.swapping = false;
+    // The envelope, signed by the direction of the step. Zeroed under reduced
+    // motion: a frame that widens and turns on its own is exactly the unprompted
+    // camera movement the preference is asking us not to make, and the states
+    // either side of the step are unaffected.
+    const swirl = spring(
+      ins.swirl,
+      reducedMotion.current || !ins.swapping ? 0 : ins.swapDir,
+      SWAP_OMEGA,
+      dtc
+    );
+    // The isolation as the FRAMING sees it — relaxed a little back toward the whole
+    // diagram while a swap is in flight. The orbit keeps the unbreathed `foc`: the
+    // widen is the camera's, and running the visitor's own yaw and pitch through it
+    // would unwind a turn they made and hand it back, which reads as the page
+    // taking the part out of their hands.
+    const focFrame = foc * (1 - SWAP_PULL * Math.abs(swirl));
 
     // The walk looks down at the playfield from 43 degrees, which is right for a
     // table and wrong for a column of parts — it foreshortens the very gaps the
     // diagram exists to show. So the finale eases the camera back down to a
     // near-side-on read, and keeps turning.
     grp.rotation.x = lerp(MODEL_PITCH * rf, FINALE_PITCH, fe) + ins.pitch * foc;
-    grp.rotation.y = MODEL_YAW * rf + spinModel * MODEL_TURN + fe * FINALE_TURN + ins.yaw * foc;
+    grp.rotation.y =
+      MODEL_YAW * rf +
+      spinModel * MODEL_TURN +
+      fe * FINALE_TURN +
+      ins.yaw * foc +
+      SWAP_SWING * swirl;
     // The pitch, resolved once. Everything that has to project an OBJECT-space
     // height onto the screen goes through this pair, and it was three separate
     // trig calls on the same angle: object +y lands cos(pitch) up the screen and
@@ -4128,9 +4336,9 @@ function SplatCloud({
         if (focGeo) {
           const close = Math.min(
             diagram * FOCUS_GAIN_MAX,
-            (FOCUS_FILL * FIT_MARGIN * Math.min(clearHalf, halfWAll)) / ins.fitR
+            (FOCUS_FILL * FIT_MARGIN * Math.min(clearHalf, halfWAll)) / ins.fitR.x
           );
-          target = lerp(diagram, close, foc);
+          target = lerp(diagram, close, focFrame);
         }
         fit = lerp(fit, target, fe);
       }
@@ -4174,7 +4382,7 @@ function SplatCloud({
           // radius, which no yaw can exceed. Blended in with the isolation so the
           // walk and the assembled diagram keep the behaviour they were tuned at.
           const spread = Math.abs(Math.cos(yaw)) + Math.abs(Math.sin(yaw));
-          const rad = focGeo ? lerp(radObj * spread, ins.fitR, foc * fe) : radObj * spread;
+          const rad = focGeo ? lerp(radObj * spread, ins.fitR.x, focFrame * fe) : radObj * spread;
           if (rad > 1e-6) {
             // The corridor between the two columns of text: the caption on the
             // left, and — once a part is isolated and big enough to reach it —
@@ -4182,7 +4390,7 @@ function SplatCloud({
             // the isolation because the assembled diagram never gets near it, and
             // reserving width for a rail the model already clears would only
             // shrink the closing shot for nothing.
-            const claimR = (reserveRightRef.current ?? 0) * perPxAll * foc * fe;
+            const claimR = (reserveRightRef.current ?? 0) * perPxAll * focFrame * fe;
             // Only if the subject cannot fit the clear width even pushed hard
             // right does it have to shrink. This is what keeps the diagram as
             // large as the frame allows instead of shrinking it on principle.
@@ -4211,7 +4419,7 @@ function SplatCloud({
         // to it, so it stays registered against the seat it was picked from and
         // the return lands it back exactly where it was.
         const cen = focLayer
-          ? lerp(finale.centreY, ins.cenY * cosPitch + ins.seat, foc)
+          ? lerp(finale.centreY, ins.cenY.x * cosPitch + ins.seat.x, focFrame)
           : finale.centreY;
         finCentre = (cen * fit - (bandTop + bandBottom) / 2) * fe;
       }
@@ -4292,14 +4500,37 @@ function SplatCloud({
         const lift =
           easeInCubic(clamp01((rem - PEEL_LIFT_START) / (1 - PEEL_LIFT_START))) * exit;
         const land = smoothstep(clamp01((fe - c.lag * FINALE_STAGGER) / (1 - FINALE_STAGGER)));
-        // Isolation rides on top of the landing fade as a second opacity, and the
-        // two multiply. Every layer is fully out of the way at sel >= 0 except the
-        // chosen one — not ghosted at 6% for context, which was the first
-        // instinct: a ghost keeps all eight layers in the TRANSPARENT pass, and
-        // the note below on early-z is the reason that costs more than it is
+        // The isolation, as a DISSOLVE. Every layer is fully out of the way at
+        // sel >= 0 except the chosen one — not ghosted at 6% for context, which was
+        // the first instinct: a ghost keeps all eight layers in the TRANSPARENT
+        // pass, and the note below on early-z is why that costs more than it is
         // worth on the most expensive beat of the page. The rail on the right is
         // where the context went instead.
-        c.alpha = damp(c.alpha, sel < 0 || sel === ci ? 1 : 0, focRate, dtc);
+        //
+        // A fixed RATE, not a damping, for two reasons that both matter here. It
+        // lands exactly and in a bounded time, so a step is over when it looks over
+        // rather than trailing an exponential nobody can see but the idle check
+        // can; and a rate is the only thing that can be SEQUENCED, which is what
+        // stops the swap being a cross-fade. See the SWAP_* constants.
+        const wanted = sel < 0 || sel === ci;
+        const rate = reducedMotion.current ? 1 : dtc / SWAP_S;
+        // Reduced motion cuts, and the handoff lead has to be cut with it — `held`
+        // is read one frame stale, so at this rate the outgoing part still measures
+        // as fully present on the frame it disappears, the gate holds the incoming
+        // one back, and the step costs a BLANK FRAME. Traced: exactly one, every
+        // time. A lead of 1 is no lead, which is what a cut means.
+        const lead = reducedMotion.current ? 1 : SWAP_HANDOFF;
+        if (!wanted) c.dis = Math.min(1, c.dis + rate);
+        // The incoming part waits until the outgoing one is mostly gone. Gated on
+        // the whole frame rather than on one named predecessor, so stepping again
+        // mid-swap — or clicking a third part from the rail — simply means there is
+        // more to clear, and the arriving part waits for all of it.
+        else if (held <= lead) c.dis = Math.max(0, c.dis - rate);
+        // Drawn at all, and pointable at all. A hard function of the dissolve
+        // rather than a fade of its own: at dis == 1 the shader has discarded every
+        // fragment, so nothing about this step is observable, and it keeps `fin`
+        // free to mean the LANDING and nothing else.
+        c.alpha = c.dis >= 1 ? 0 : 1;
         // Hover is per layer and damped, so crossing a boundary is a swap rather
         // than a flicker, and a pointer skimming across the stack does not strobe.
         c.hot = damp(c.hot, ins.hot === ci && sel < 0 ? 1 : 0, ORBIT_RATE, dtc);
@@ -4337,12 +4568,16 @@ function SplatCloud({
         const insDim = sel >= 0 ? 0 : ins.hot >= 0 && ins.hot !== ci ? 1 - c.hot : 0;
         c.material.uniforms.uDim.value = Math.max(insDim, deckEmph * dimW * WALK_DIM);
 
-        // Two opacities that multiply, and a third that does not. `appear` and the
-        // isolation are both real transparency; the peel is a DISSOLVE, which the
-        // shader spends per fragment against the detail channel rather than as a
-        // uniform alpha, so it stays out of `fin` and travels on its own uniform.
+        // `appear` is real transparency and travels as uniform alpha; the two
+        // dissolves are spent per fragment against the detail channel, so they stay
+        // out of `fin` and go down uPeel instead.
         const fin = appear * c.alpha;
-        const peel = rem * (1 - land);
+        // The teardown's removal and the isolation's swap are the same effect on
+        // the same channel and can never both be live — the walk's term is scaled
+        // out by `land` before the diagram is pointable — so the larger wins rather
+        // than needing a blend. Smootherstep on the swap alone: the walk's is
+        // already shaped by the beat curve that produced `rem`.
+        const peel = Math.max(rem * (1 - land), smootherstep(c.dis));
         // A fully evaporated layer is not merely invisible, it is not drawn: at
         // the end of the walk that is six of the eight, and skipping them takes
         // their vertex work and their discarded fragments off the frame entirely.
@@ -4417,10 +4652,14 @@ function SplatCloud({
         let best = Infinity;
         for (let ci = 0; ci < cad.length; ci++) {
           const c = cad[ci];
-          // A layer that has been faded out by the isolation is not pointable —
-          // otherwise clicking the empty frame beside an isolated part would
-          // silently select whatever invisible layer's box happens to be there.
-          if (!c.root.visible || c.alpha < 0.5) continue;
+          // A layer the isolation has taken away is not pointable — otherwise
+          // clicking the empty frame beside an isolated part would silently select
+          // whatever invisible layer's box happens to be there. Tested on the
+          // dissolve rather than on `alpha`, which now only says "drawn at all":
+          // half way through a swap the outgoing part is still being rasterised as
+          // tracery, and a click landing then must not re-open the part the visitor
+          // has just stepped off.
+          if (!c.root.visible || c.dis > 0.5) continue;
           // Test in the LAYER'S OWN space. Transforming the box to world instead
           // would mean re-fitting an axis-aligned box around a rotated one, and at
           // this pitch and yaw that inflates the flat layers by half their height
@@ -4713,9 +4952,16 @@ function SplatCloud({
     // nine gaussian captures. It now fires at SOLID_END — 149vh of 940 — so this
     // skip covers the ENTIRE WALK, not just the closing beat, and parking at any
     // hold in the teardown costs nothing at all. That is the largest single saving
-    // on the page. It is sound because everything not in the hash below (uPeel,
-    // uAccent, uExposure, uAmbient, uAo, uAoDirect) is a pure function of `p`,
-    // which is, and because driveScroll ARRIVES rather than approaching forever.
+    // on the page. It is sound because everything not in the hash below (uAccent,
+    // uExposure, uAmbient, uAo, uAoDirect) is a pure function of `p`, which is, and
+    // because driveScroll and spring() both ARRIVE rather than approaching forever.
+    //
+    // uPeel used to be on that list, on the same "pure function of p" grounds, and
+    // it is IS in the hash now because that stopped being true: the isolation swap
+    // sweeps it on a clock of its own. The framing moves during most of a swap and
+    // would have covered it by accident, but only most — a swap whose camera has
+    // already arrived while the new part is still forming would have frozen the
+    // dissolve half way, on the one beat a visitor is looking straight at it.
     const canIdle = !!cad && splatsGone && intro.current >= 1 && wm.done;
     let sig = p * 7919 + progressRef.current * 6271 + fit * 4271;
     sig +=
@@ -4734,6 +4980,7 @@ function SplatCloud({
           (ci + 1) *
           ((c.root.visible ? 1 : 0) * 31 +
             u.uFade.value * 337 +
+            u.uPeel.value * 419 +
             u.uHot.value * 547 +
             u.uDim.value * 641 +
             c.root.position.y * 769 +
@@ -5486,13 +5733,20 @@ export default function ScrollScene({
     };
     // Deliberately NOT Home/End/Space: those stay with the page, so a keyboard
     // is never without a way out that is not Escape.
+    //
+    // Through `fire` rather than straight to `cycle`, so the arrows pay the same
+    // cooldown the wheel does. A held ArrowDown autorepeats at about thirty a
+    // second once the OS delay has passed, and called directly that spun the stack
+    // exactly the way one trackpad flick used to — the fix for one is the fix for
+    // the other. The refused repeats simply do nothing, which is what a key held
+    // down against a transition should do.
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'ArrowDown' || e.key === 'PageDown') {
         e.preventDefault();
-        cycle(1);
+        fire(1);
       } else if (e.key === 'ArrowUp' || e.key === 'PageUp') {
         e.preventDefault();
-        cycle(-1);
+        fire(-1);
       }
     };
 
