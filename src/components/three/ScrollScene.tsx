@@ -1869,11 +1869,12 @@ function parseCadLayers(ab: ArrayBuffer, indexAb: ArrayBuffer): CadLayer[] | nul
   // and this does not use it.
   //
   // The expansion it was defending was 3.3x: a 12-byte-per-vertex file became 40
-  // bytes on the GPU (pos 12 + nrm 12 + col 12 + mra 4) across ~432k vertices. That
+  // bytes on the GPU (pos 12 + nrm 12 + col 12 + mra 4) across ~412k vertices. That
   // is the wrong trade twice over, because this pass is VERTEX bound — 1.1M
   // triangles over 5.2 Mpx is 4.7 pixels a triangle — so those bytes are re-fetched
   // for every one of ~1.5M vertex invocations on every drawn frame, not merely
-  // parked in VRAM. 40 -> 28 bytes.
+  // parked in VRAM. 40 -> 22 bytes: pos u16x3, nrm i16x3, col u16x3, mra u8x4,
+  // which is the file's own 12 plus the two widenings named below.
   //
   // The widths are not arbitrary. Colour is 16-bit because the palette's darkest
   // channel is 0.0020 in LINEAR light: 8-bit would quantise that to one step of
@@ -1883,13 +1884,19 @@ function parseCadLayers(ab: ArrayBuffer, indexAb: ArrayBuffer): CadLayer[] | nul
   // bearing sits at roughness 0.06, where 8-bit's 0.45 degrees of angular error is
   // a visible wobble in the highlight. Neither is a guess; see the palette read.
   //
-  // Positions are deliberately left as float. They are the remaining 12 bytes and
-  // the file has them as uint16 with a per-shape offset and scale, but taking them
-  // needs that offset and scale as PER-SHAPE uniforms — the materials are per
-  // LAYER, shared by every shape in it — which means an onBeforeRender on all 120
-  // meshes plus dequantisation in the surface sampler and in the detail channel's
-  // area sums. Six bytes for four more places to be wrong, on the one attribute
-  // where a mistake is a cracked model rather than a slightly wrong colour.
+  // Positions stay quantised too, and the way that is done is the interesting
+  // part. The obvious route is a per-shape offset and scale as UNIFORMS, which is
+  // nasty here: materials are per LAYER and shared by every shape in it, so each
+  // draw would have to rewrite them in onBeforeRender and set uniformsNeedUpdate,
+  // and three re-uploads the material's WHOLE uniform block when that is set —
+  // ~15 uniforms times 120 draws a frame, to save 6 bytes a vertex.
+  //
+  // Instead the offset and step ride the INSTANCE MATRIX, which is already there,
+  // is already per shape, and costs 421 matrices once at load instead of anything
+  // per frame. The one requirement is that the step be uniform across the three
+  // axes, or the matrix stops being a similarity and skews every normal; see the
+  // note on `qs`. CAD_VERT is not touched at all, which on a file whose shaders
+  // are template literals is worth more than the six bytes.
   function buildGroup(gi: number): {
     geo: THREE.BufferGeometry;
     mats: Float32Array;
@@ -1918,11 +1925,27 @@ function parseCadLayers(ab: ArrayBuffer, indexAb: ArrayBuffer): CadLayer[] | nul
     const sx = iv.getFloat32(o + 40, true) / 65535;
     const sy = iv.getFloat32(o + 44, true) / 65535;
     const sz = iv.getFloat32(o + 48, true) / 65535;
+    // ONE step for all three axes, so the dequantisation is a similarity and can
+    // ride the instance matrix. The file quantises each axis into the shape's own
+    // bbox independently, which is tighter but makes the decode a NON-UNIFORM
+    // scale — and a non-uniform scale in the instance matrix would skew every
+    // normal the vertex shader carries through mat3 of it.
+    //
+    // Re-quantising to the largest axis costs almost nothing, because the step is
+    // then the same ABSOLUTE size on every axis: qExtentMax / 65535. The widest
+    // shape here is a few units across, so that is under 1e-4 world units against
+    // a machine ~10.8 units wide drawn ~1400 px tall — roughly a hundredth of a
+    // pixel. A thin plate loses relative precision on its thin axis and none that
+    // can be seen, because what matters on screen is the absolute step.
+    const qs = Math.max(sx, sy, sz) || 1;
+    const rx = sx / qs;
+    const ry = sy / qs;
+    const rz = sz / qs;
 
     const u16 = new Uint16Array(ab, vbase * stride, nverts * 6);
     const i16 = new Int16Array(ab, vbase * stride, nverts * 6);
     const u8 = new Uint8Array(ab, vbase * stride, nverts * stride);
-    const pos = new Float32Array(nverts * 3);
+    const pos = new Uint16Array(nverts * 3);
     const nrm = new Int16Array(nverts * 3);
     const col = new Uint16Array(nverts * 3);
     // metallic, roughness, occlusion, DETAIL. The fourth channel is not in the
@@ -1934,9 +1957,12 @@ function parseCadLayers(ab: ArrayBuffer, indexAb: ArrayBuffer): CadLayer[] | nul
       const s = v * 6;
       const d = v * 3;
       const m = v * 4;
-      pos[d] = qx + u16[s] * sx;
-      pos[d + 1] = qy + u16[s + 1] * sy;
-      pos[d + 2] = qz + u16[s + 2] * sz;
+      // Left QUANTISED. The origin and the step are folded into the instance
+      // matrix below, so the GPU gets 6 bytes here instead of 12 and CAD_VERT is
+      // not touched at all.
+      pos[d] = Math.round(u16[s] * rx);
+      pos[d + 1] = Math.round(u16[s + 1] * ry);
+      pos[d + 2] = Math.round(u16[s + 2] * rz);
 
       // Octahedral decode. The fold is the whole trick: the lower hemisphere is
       // stored mirrored into the corners of the square, so both hemispheres get the
@@ -1975,6 +2001,9 @@ function parseCadLayers(ab: ArrayBuffer, indexAb: ArrayBuffer): CadLayer[] | nul
     }
 
     const geo = new THREE.BufferGeometry();
+    // NOT normalized, unlike the two below: these are raw lattice indices, 0..65535,
+    // and the vertex fetch hands them to `in vec3 position` as the floats they are.
+    // The instance matrix turns them back into world units.
     geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
     // normalized: the fetch widens SHORT to [-1,1] and USHORT to [0,1] for free,
     // so CAD_VERT reads the same vec3 it always did.
@@ -2085,6 +2114,31 @@ function parseCadLayers(ab: ArrayBuffer, indexAb: ArrayBuffer): CadLayer[] | nul
         for (let c = 0; c < 4; c++) m[c * 4 + r] = iv.getFloat32(mo + (r * 4 + c) * 4, true);
       }
       m[15] = 1;
+      // Post-multiply by translate(quantOrigin) * scale(qs), which is what turns a
+      // lattice index back into a world point: M' = M * T(q) * S(qs). Written out
+      // rather than built with Matrix4 because it is three column scalings and one
+      // transformed origin, and this runs 421 times on the load path.
+      //
+      // Everything downstream keeps working WITHOUT KNOWING, and that is the whole
+      // reason this is done here rather than in the shader: the detail channel, the
+      // per-vertex area weights, the shape's bounding sphere and the surface
+      // sampler all express local quantities in these lattice units and every one
+      // of them already multiplies by the instance scale, which now carries `qs`.
+      const t0 = m[0] * qx + m[4] * qy + m[8] * qz + m[12];
+      const t1 = m[1] * qx + m[5] * qy + m[9] * qz + m[13];
+      const t2 = m[2] * qx + m[6] * qy + m[10] * qz + m[14];
+      m[0] *= qs;
+      m[1] *= qs;
+      m[2] *= qs;
+      m[4] *= qs;
+      m[5] *= qs;
+      m[6] *= qs;
+      m[8] *= qs;
+      m[9] *= qs;
+      m[10] *= qs;
+      m[12] = t0;
+      m[13] = t1;
+      m[14] = t2;
     }
 
     // How far this shape reaches from the explode axis, at any yaw. Needed
@@ -2415,7 +2469,7 @@ function parseCadLayers(ab: ArrayBuffer, indexAb: ArrayBuffer): CadLayer[] | nul
 // transform the mesh uses is what makes the two one picture.
 function sampleCadSurface(cad: CadLayer[], limit: number): ModelSource | null {
   type Piece = {
-    pos: Float32Array;
+    pos: Uint16Array;
     col: Uint16Array;
     nrm: Int16Array;
     mra: Uint8Array;
@@ -2456,7 +2510,7 @@ function sampleCadSurface(cad: CadLayer[], limit: number): ModelSource | null {
       const mraAttr = geo.getAttribute('mra');
       const index = geo.getIndex();
       if (!posAttr || !colAttr || !nrmAttr || !mraAttr || !index) continue;
-      const pos = posAttr.array as Float32Array;
+      const pos = posAttr.array as Uint16Array;
       // Quantised on the way to the GPU, so this pass has to undo the same two
       // scalings the vertex fetch would have done for it. The normal's cancels —
       // it is normalised three lines after it is read — so only the colour needs
