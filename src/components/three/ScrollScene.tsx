@@ -894,10 +894,28 @@ const PACE_HANDOFF_S = 1.2;
 const PACE_HOLD_S = 0.45;
 const PACE_V_HANDOFF = (WALK_BEAT * WALK_TRANSITION) / PACE_HANDOFF_S;
 const PACE_V_HOLD = (WALK_BEAT * (1 - WALK_TRANSITION)) / PACE_HOLD_S;
-// Outside the walk: a sanity bound the spring never reaches (its own peak speed
-// across a full-page error is ~1.4/s). The word, the morph and the finale are
-// each one continuous beat where scrubbing fast is still legible, so they are
-// deliberately not paced.
+// The LANDING is a beat too, and treating it as one is the fix for the last thing
+// you could scroll straight through. It was outside the walk, so the leash opened
+// to the whole page and the speed limit went to PACE_FREE the instant the scene
+// reached WALK_S1 — and one flick from the last teardown hold cleared the landing
+// AND the 143vh hold beat behind it. Measured before this change: from the beat-08
+// hold at 78.0% of the hero, one 1000px flick landed at 95.0%, so the closing
+// diagram assembled and the belt view arrived somewhere inside a single gesture
+// nobody was watching, and the next flick left the hero entirely.
+//
+// So the beat axis gets a ninth entry. It is not WALK_BEAT wide — the landing is
+// its own share of the page — which is why beatOf and scrollOfBeat below are
+// piecewise rather than one multiply.
+const FINALE_BEAT = WALK_LAYERS + 1;
+// Seconds to cross it at full tilt. Comparable to a walk beat's 1.65s, because it
+// is a comparable amount of movement: eight layers flying back to their seats on a
+// bottom-up stagger, which is the largest single move in the hero.
+const PACE_FINALE_S = 1.4;
+const PACE_V_FINALE = (DOLLY_END - WALK_S1) / PACE_FINALE_S;
+// Outside the walk and the landing: a sanity bound the spring never reaches (its
+// own peak speed across a full-page error is ~1.4/s). The word and the morph are
+// each one continuous beat where scrubbing fast is still legible, and the hold beat
+// is a room the page walks you through on the way out rather than a beat at all.
 const PACE_FREE = 4;
 // Phase width of the ramp between the two limits, so the follow speed eases
 // between them instead of stepping.
@@ -922,18 +940,32 @@ const SNAP_DELAY_MS = 220;
 // any rounding, far smaller than SNAP_TRIGGER.
 const BEAT_EPS = 0.02;
 
-// The walk's position in beats, and back. Whole numbers are the layer holds: the
-// only places inside the walk where the scene is a readable still.
+// Position in beats, and back. Whole numbers are the readable stills: the eight
+// layer holds, and then the landed diagram at FINALE_BEAT.
+//
+// Piecewise, because the ninth beat is a different width from the other eight —
+// the walk is B_WALK split eight ways and the landing is B_FINALE whole. The two
+// pieces meet at exactly b = WALK_LAYERS, and the pair are exact inverses on both
+// sides of it. Deliberately NOT clamped at the top: past the landing this keeps
+// counting in landing-widths, and the leash reads that as "well past the last
+// detent" rather than having to special-case it twice.
 function beatOf(s: number) {
-  return (s - WALK_S0) / WALK_BEAT;
+  if (s <= WALK_S1) return (s - WALK_S0) / WALK_BEAT;
+  return WALK_LAYERS + (s - WALK_S1) / Math.max(1e-9, DOLLY_END - WALK_S1);
 }
 function scrollOfBeat(b: number) {
-  return WALK_S0 + b * WALK_BEAT;
+  if (b <= WALK_LAYERS) return WALK_S0 + b * WALK_BEAT;
+  return WALK_S1 + (b - WALK_LAYERS) * (DOLLY_END - WALK_S1);
 }
 
 // Speed limit at a point on the scroll axis, in progress per second.
 function paceLimit(s: number) {
-  if (s <= WALK_S0 || s >= WALK_S1) return PACE_FREE;
+  if (s <= WALK_S0 || s >= DOLLY_END) return PACE_FREE;
+  // The landing is one beat and is crossed at one speed — there is no hold half
+  // and handoff half to it, the whole thing is the move. The step up from the
+  // walk's handoff limit at this boundary is about 2x; it used to be 138x, which
+  // is what PACE_FREE works out to here.
+  if (s >= WALK_S1) return PACE_V_FINALE;
   // Phase inside the current layer's beat, sliced exactly the way the walk
   // block slices `raw`: the hold is the first (1 - WALK_TRANSITION), the handoff
   // is the rest and runs to the end of the beat.
@@ -964,13 +996,27 @@ function paceLimit(s: number) {
 // offset forward. Quantised, the window is the pair of readable stills either
 // side of the scene, and the walk cannot drift off them.
 function leashCeil(scene: number) {
-  if (scene >= WALK_S1) return 1;
   const b = beatOf(Math.max(scene, WALK_S0));
-  return Math.min(1, scrollOfBeat(Math.floor(b + BEAT_EPS) + LEASH_BEATS));
+  // Once the landing has ARRIVED there is nothing left to hold anyone to. The hold
+  // beat is 143vh of constant scene — a room the page walks you through so the
+  // diagram gets a moment of sitting still before you point at it — and detenting
+  // inside it would only make leaving the hero feel like being let out.
+  if (b >= FINALE_BEAT - BEAT_EPS) return 1;
+  // Never past the landing in one gesture, whichever beat you set off from. The
+  // min() is what stops a flick that starts mid-landing from carrying on out of
+  // the hero, which is the same failure one beat further along.
+  return Math.min(
+    1,
+    scrollOfBeat(Math.min(FINALE_BEAT, Math.floor(b + BEAT_EPS) + LEASH_BEATS))
+  );
 }
 function leashFloor(scene: number) {
   if (scene <= WALK_S0) return 0;
-  const b = beatOf(Math.min(scene, WALK_S1));
+  // From inside the hold beat, back is the landing's own end — and since the scene
+  // is identical everywhere in the hold beat, the first thing a backward gesture
+  // can actually CHANGE is the layer hold below it. Clamping to FINALE_BEAT is what
+  // makes that one step rather than one landing-width.
+  const b = Math.min(beatOf(scene), FINALE_BEAT);
   return Math.max(0, scrollOfBeat(Math.ceil(b - BEAT_EPS) - LEASH_BEATS));
 }
 
@@ -981,7 +1027,7 @@ function leashFloor(scene: number) {
 // leash has already bounded that anyway.
 function snapBeat(s: number, from: number | null) {
   const b = beatOf(s);
-  const hold = (n: number) => Math.min(WALK_LAYERS, Math.max(0, n));
+  const hold = (n: number) => Math.min(FINALE_BEAT, Math.max(0, n));
   // No origin worth stepping from — the walk was entered from the table beat
   // above it, or a jump the leash let through re-seated the scene. Land on the
   // nearest hold instead, so arriving at the assembled table does not immediately
@@ -5165,6 +5211,27 @@ function CameraRig({
 // drawing the cloud: the multisampled pass and the alpha-blended pass can never
 // overlap, by construction rather than by tuning.
 //
+// That was reasoning, and it has now been measured, because the offscreen path is
+// not cheap and it was worth knowing whether it was buying anything. Built with
+// `antialias: true` on the context and this whole path removed, on an Apple M4 at
+// 1440x900 dpr 2 (GPU time, median of ~420 frames):
+//
+//   beat        offscreen 4x    canvas antialias
+//   word             3.06 ms          7.18 ms     cloud only
+//   morph            9.72 ms         35.35 ms     cloud and mesh together
+//   belt/hold        8.50 ms          5.65 ms     mesh only
+//
+// So the trade is real in both directions and much sharper than the prose above
+// suggests. On the solid beats the canvas flag is BETTER — it saves the whole
+// offscreen path and its own multisampling costs 0.6 ms, because the resolve
+// happens in tile memory. On the morph it is a catastrophe: three and a half times
+// the frame, twenty-five milliseconds, from multisampling a cloud whose quads have
+// no silhouette worth sampling in the first place. The alpha-blended pass is
+// exactly what this argument said it was.
+//
+// Which leaves the offscreen target as the only way to have it on one and not the
+// other, and it is kept for that reason and no other.
+//
 // This used to be gated on the closing diagram alone, and that is why the walk
 // aliased. The reasoning behind that gate was sound while everything before the
 // diagram was gaussians — soft gaussians genuinely cannot alias — but the walk is
@@ -5215,6 +5282,43 @@ void main() {
 // now covers roughly 80% of the page, all of it moving and all of it hard-edged
 // CAD, and a mid-ladder rung that turns anti-aliasing off entirely is a visible
 // cliff rather than a graceful degradation. The floor still drops it.
+//
+// THE LAST RUNG IS NOT THE SAME KIND OF STEP AS THE OTHERS, and the numbers say so
+// far more loudly than the shape of this array does. Zero does not mean "two fewer
+// samples" — it takes the branch in DiagramMsaa that skips the offscreen target
+// altogether and renders straight to the canvas, so it drops the whole second
+// framebuffer, its depth attachment and its resolve. Measured on an Apple M4,
+// Chrome, 1440x900 dpr 2 (the pixel budget's own cap, 5.15 Mpx), GPU time for the
+// held diagram by EXT_disjoint_timer_query, median of ~420 frames.
+//
+// The sample count can be forced from outside by hooking
+// renderbufferStorageMultisample, so these three are one run and directly
+// comparable:
+//
+//   render target, 4x     8.00 ms
+//   render target, 2x     7.22 ms      <- one rung of this array:  -0.78
+//   render target, 1x     6.77 ms
+//
+// Losing the target needs this array set to zeroes and a build, so it is a
+// separate run with its own control, and run-to-run spread here is about 6%:
+//
+//   render target, 4x     8.50 ms
+//   no render target      5.04 ms      <- the last rung:           -3.46
+//
+// So all the sample steps together are worth about a millisecond and the trapdoor
+// at the end is worth three and a half. Anyone tuning this array should know that
+// before reading it as a smooth ramp.
+//
+// It also differs by a factor of five between GPU classes, which is why the AMD
+// Renoir table at PIXEL_BUDGET_SOLID and this one disagree and why both are kept.
+// There, multisampling was two thirds of the frame; here the entire offscreen path
+// is 41% and the samples themselves are 9%. Renoir is immediate-mode and
+// bandwidth-poor, so four samples really are four times the traffic; the M4 is a
+// tiler and keeps them in tile memory, where the cost that remains is the extra
+// full-size attachments and the resolve rather than the sampling. A ladder that
+// drops multisampling first is right for the first machine and close to a no-op on
+// the second — which is an argument for the governor measuring rather than for
+// picking a different fixed order, and it already does.
 const MSAA_BY_LEVEL = [4, 2, 2, 2, 0];
 
 // The hold beat is a still picture that costs a million triangles and a
@@ -5991,7 +6095,22 @@ export default function ScrollScene({
       const live = inViewRef.current && performance.now() - d.wall < 1000 / PACE_MIN_FPS;
       if (!d.paced || !d.primed || !live) return;
       const cur = clamp01((window.scrollY - metrics.top) / metrics.span);
-      if (cur <= WALK_S0 || cur >= WALK_S1) {
+      // The landing is a beat and gets a detent like every other one, so a release
+      // part way through it finishes the landing rather than parking on a diagram
+      // with half its layers still in the air.
+      //
+      // Past the landing, only a gesture that set off from BELOW it is pulled back.
+      // The leash cannot do this part on its own: it is a pure function of where
+      // the SCENE is, so it opens the moment the landing arrives, and the tail of
+      // the very gesture that got you there runs on through the opening. Measured:
+      // one flick off the beat-08 hold came to rest at 90.8%, five points past the
+      // belt view it had just been leashed to. The snap is what closes that.
+      //
+      // And it must close it only in that direction. The hold beat is the way OUT
+      // of the hero, so snapping a gesture that started there would make it a trap:
+      // every attempt to leave answered by a jump back to the diagram.
+      const leaving = rest === null || rest >= FINALE_BEAT;
+      if (cur <= WALK_S0 || (cur >= DOLLY_END && leaving)) {
         rest = null;
         return;
       }
@@ -6045,8 +6164,8 @@ export default function ScrollScene({
         // thought it started at 3 reads as +0.7 and commits forward.
         const b = beatOf(d.p);
         rest =
-          d.primed && b >= -BEAT_EPS && b <= WALK_LAYERS + BEAT_EPS
-            ? Math.min(WALK_LAYERS, Math.max(0, Math.round(b)))
+          d.primed && b >= -BEAT_EPS && b <= FINALE_BEAT + BEAT_EPS
+            ? Math.min(FINALE_BEAT, Math.max(0, Math.round(b)))
             : null;
       }
       lastScrollAt = now;
