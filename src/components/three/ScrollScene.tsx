@@ -779,7 +779,7 @@ function screenHalfH(yHalf: number, planHalf: number, cosP: number, sinP: number
 // frame is not a speed, it is a speed per FRAME: the same code converges twice
 // as fast on a 120Hz display as on a 60Hz one and crawls on a 30Hz one, so the
 // hero's feel changed with whatever monitor it landed on. Rate is per second.
-function damp(x: number, target: number, rate: number, dt: number) {
+function damp(x: number, target: number, rate: number, dt: number, eps = 1e-4) {
   const v = target + (x - target) * Math.exp(-rate * dt);
   // ARRIVE, rather than approach forever. An exponential never reaches its
   // target: at rate 6 and a 60Hz frame it closes 9% of the remaining gap each
@@ -788,9 +788,15 @@ function damp(x: number, target: number, rate: number, dt: number) {
   // asks whether this frame's scene is the same as last frame's — and a value
   // that never stops changing means a diagram nobody is touching re-renders a
   // million triangles forever. Everything damped here is either radians or
-  // world units where 1 unit is about 100 px, so this threshold is well under
-  // a hundredth of a pixel.
-  return Math.abs(v - target) < 1e-4 ? target : v;
+  // world units where 1 unit is about 100 px, so the default is well under a
+  // hundredth of a pixel.
+  //
+  // `eps` is there because one caller's units are not another's and the tail of an
+  // exponential is long enough for the difference to be seconds — see the camera
+  // rig, where the same 1e-4 was three seconds of settling for a tenth of a pixel
+  // of travel. Raising it does not change how anything MOVES, only when it admits
+  // it has stopped.
+  return Math.abs(v - target) < eps ? target : v;
 }
 
 // The remaining error a spring is allowed to give up on. Everything sprung here is
@@ -888,10 +894,38 @@ const WALK_BEAT = (WALK_S1 - WALK_S0) / WALK_LAYERS;
 // because the two halves are not the same thing to look at: the handoff is where
 // the dissolve and the lift live and it gets the time, while the hold is a seated
 // machine with the tail of the previous dolly still running over it and may be
-// crossed faster — but not instantly, or that dolly snaps. Together this is ~1.65s
-// per layer, so ~13.2s for the whole walk.
-const PACE_HANDOFF_S = 1.2;
-const PACE_HOLD_S = 0.45;
+// crossed faster — but not instantly, or that dolly snaps.
+//
+// These were 1.2 and 0.45, and the walk was reported as feeling HEAVY to scroll.
+// It was, and by more than the constants admit. What a visitor actually experiences
+// is not "1.65s per beat", it is the whole round trip from flicking to the page
+// being willing to move again — the flick's own event stream, the leash holding
+// scroll at one beat ahead of the scene, the scene crossing that beat at this
+// limit, SNAP_DELAY_MS of quiet, the snap, and the spring settling onto the
+// boundary. Measured end to end by watching for the idle skip to go quiet again
+// (real GPU, eight consecutive flicks at the first walk holds): a median of
+// 3833 ms per flick, so about 31 SECONDS of waiting to get through eight layers.
+//
+// More than halved: 0.78s a beat against 1.65s. The floor on the handoff is what
+// the REMOVAL needs in order to read — the dissolve and the lift are the one thing
+// on this beat worth watching — and 0.6s is comfortably above the 0.46s the stack
+// swap dissolves in, which reads cleanly. The hold has no such floor; it is a still
+// machine, and only the tail of the previous dolly crossing it stops this being
+// zero.
+//
+// The felt wait is not this number and is what was actually checked: tracking the
+// MODEL'S OWN world matrix after a flick, so the question is when the PICTURE
+// stops rather than when the page stops drawing. Median over six flicks at the
+// early walk holds, real GPU: 1999 ms before, 1317 ms here.
+//
+// 0.5/0.15 was tried and gave 1384 ms — no better, and inside the noise. That is
+// worth writing down, because it says the limit has stopped being what binds. What
+// is left is the flick's own event stream (~310 ms), SNAP_DELAY_MS, the scroll
+// spring's own settle, and the dolly behind it; cutting this further just buys a
+// less readable removal for nothing. See the camera rig for the piece of that
+// chain which turned out to be worth two seconds.
+const PACE_HANDOFF_S = 0.6;
+const PACE_HOLD_S = 0.18;
 const PACE_V_HANDOFF = (WALK_BEAT * WALK_TRANSITION) / PACE_HANDOFF_S;
 const PACE_V_HOLD = (WALK_BEAT * (1 - WALK_TRANSITION)) / PACE_HOLD_S;
 // The LANDING is a beat too, and treating it as one is the fix for the last thing
@@ -907,10 +941,13 @@ const PACE_V_HOLD = (WALK_BEAT * (1 - WALK_TRANSITION)) / PACE_HOLD_S;
 // its own share of the page — which is why beatOf and scrollOfBeat below are
 // piecewise rather than one multiply.
 const FINALE_BEAT = WALK_LAYERS + 1;
-// Seconds to cross it at full tilt. Comparable to a walk beat's 1.65s, because it
-// is a comparable amount of movement: eight layers flying back to their seats on a
-// bottom-up stagger, which is the largest single move in the hero.
-const PACE_FINALE_S = 1.4;
+// Seconds to cross it at full tilt. Still the slowest beat on the page and
+// deliberately so — eight layers flying back to their seats on a bottom-up stagger
+// is the largest single move in the hero, and this is the beat the detent above
+// exists to make sure anyone sees at all. But it has to stay in proportion to the
+// walk that leads into it: at 1.4s against a beat that now crosses in 0.78s it was
+// the one place the page went heavy again, right after it had stopped being.
+const PACE_FINALE_S = 1.0;
 const PACE_V_FINALE = (DOLLY_END - WALK_S1) / PACE_FINALE_S;
 // Outside the walk and the landing: a sanity bound the spring never reaches (its
 // own peak speed across a full-page error is ~1.4/s). The word and the morph are
@@ -1053,6 +1090,26 @@ type Drive = {
 // Below this frame rate the leash lets go — see Drive.wall.
 const PACE_MIN_FPS = 5;
 
+// How close the scroll spring has to get before it gives up and lands exactly.
+//
+// Stated where it can be checked: one walk beat is 0.0696 of this axis and moves
+// the model about a frame height, so progress converts to screen at roughly
+// 12,900 px per unit — which makes this a fifth of a pixel of travel still to come.
+// A critically damped spring's remaining error is also the furthest it can still
+// move, so that is the whole of what is being given up.
+//
+// It was 1e-6 — a hundredth of a pixel, which is nothing this page can spend.
+//
+// Honesty about why it was changed: it was changed on a WRONG diagnosis and kept
+// on its own merits. The page draws for 1.7s after the picture has stopped, and
+// this looked like the cause; raising it measured no improvement at all, because
+// the actual culprit was the camera dolly damping at rate 3 (see CameraRig). The
+// threshold is still indefensible at 1e-6 and is still the right value here, but it
+// bought nothing on its own and should not be credited with anything.
+//
+// Same reasoning as SPRING_EPS, one axis up. damp() has its own at 1e-4.
+const SCROLL_ARRIVE = 1.5e-5;
+
 // Solved implicitly — the denominator is (1 + omega*h)^2, so it cannot ring or
 // blow up however long the frame was. Stamped by clock time because r3f runs
 // useFrame subscribers in mount order; whichever consumer arrives first this
@@ -1094,8 +1151,7 @@ function driveScroll(d: Drive, target: number, dt: number, stamp: number) {
   }
   // And arrive when it merely creeps in, which is the case a sign change never
   // catches: the pacing clamp can strip the overshoot that would have crossed.
-  // Progress is 0..1 over 940vh, so this is a twentieth of a pixel of scroll.
-  if (Math.abs(d.p - target) < 1e-6 && Math.abs(d.v) < 1e-5) {
+  if (Math.abs(d.p - target) < SCROLL_ARRIVE && Math.abs(d.v) < SCROLL_ARRIVE * 10) {
     d.p = target;
     d.v = 0;
   }
@@ -5190,9 +5246,33 @@ function CameraRig({
     const targetZ = 10 - zoom * 2.5;
     const dt = Math.min(delta, 0.05);
 
-    camera.position.x = damp(camera.position.x, state.pointer.x * 0.8, 3, dt);
-    camera.position.y = damp(camera.position.y, state.pointer.y * 0.5, 3, dt);
-    camera.position.z = damp(camera.position.z, targetZ, 3, dt);
+    // The rig is what kept the page RENDERING long after it had stopped MOVING,
+    // and the fix is the threshold rather than the rate.
+    //
+    // Camera z is not only the camera: halfVAll is derived from it, which sets the
+    // clear band, which sets every beat's fit, which is the GROUP'S SCALE. So a
+    // dolly still creeping is a model still resizing, and the exact idle check
+    // downstream sees that and re-renders 1.07M triangles for it. Measured on the
+    // real GPU by watching the model's own world matrix after a flick: the picture
+    // stopped at 1.3s and the page drew until 3.2s. Rate 3 against damp()'s default
+    // 1e-4 is 3.07s to arrive — that number exactly.
+    //
+    // Rate 6 was the obvious fix and is NOT taken. It works, and it costs more than
+    // it saves: scrubbing the hero end to end, late frames went from 0.3% to 10.2%
+    // and p95 from 18.7ms to 23.0ms. Ten percent of frames missed during continuous
+    // scrolling is precisely the symptom this whole exercise is about, and trading
+    // it for invisible settling would be trading the complaint for the cure.
+    //
+    // So the motion is left exactly as it was and only the arrival moves. One world
+    // unit of camera z at z ~= 10 changes the projected scale by about a tenth of
+    // its own value in pixels, so 1e-3 is a tenth of a pixel of travel still to
+    // come — invisible, and 2.3s to reach instead of 3.07s.
+    const EPS = 1e-3;
+    // X and Y are the POINTER parallax and are deliberately soft — a camera that
+    // snaps to the cursor reads as a cursor, not as a camera.
+    camera.position.x = damp(camera.position.x, state.pointer.x * 0.8, 3, dt, EPS);
+    camera.position.y = damp(camera.position.y, state.pointer.y * 0.5, 3, dt, EPS);
+    camera.position.z = damp(camera.position.z, targetZ, 3, dt, EPS);
     camera.lookAt(0, 0, 0);
   });
 
