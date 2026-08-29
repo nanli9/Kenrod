@@ -1,5 +1,5 @@
 import { NextIntlClientProvider } from 'next-intl';
-import { getMessages } from 'next-intl/server';
+import { getMessages, setRequestLocale } from 'next-intl/server';
 import { notFound } from 'next/navigation';
 import { Inter, Anton, IBM_Plex_Mono, Noto_Sans_SC } from 'next/font/google';
 import { routing } from '@/i18n/routing';
@@ -53,6 +53,24 @@ const plexMono = IBM_Plex_Mono({
   display: 'swap',
 });
 
+// Prerender both locales at build time instead of rendering them per request.
+//
+// Without this the [locale] segment has no known set of values, so Next has to
+// treat every URL under it as dynamic and run the whole tree — fonts, layout,
+// the client bundle's HTML shell — on each visit. Nothing on this page varies by
+// request: it is one marketing page in two languages, both fully determined at
+// build. Listing them here turns /en and /zh into static HTML the CDN answers
+// directly, which is also what makes the hero's two <link rel="preload"> tags
+// worth having, since they now ship in a document that needs no server round
+// trip to produce.
+//
+// Sourced from routing.locales rather than a literal, so adding a third locale
+// to src/i18n/routing.ts cannot leave a page behind that silently reverts to
+// dynamic rendering.
+export function generateStaticParams() {
+  return routing.locales.map((locale) => ({ locale }));
+}
+
 export default async function LocaleLayout({
   children,
   params,
@@ -65,6 +83,18 @@ export default async function LocaleLayout({
   if (!routing.locales.includes(locale as 'en' | 'zh')) {
     notFound();
   }
+
+  // Hand next-intl the locale explicitly. This is not a formality and it is not
+  // optional: without it getMessages() resolves the locale by reading request
+  // headers, and a single headers() read anywhere in the tree opts the entire
+  // segment back out of static rendering — generateStaticParams above would go
+  // on producing both pages while every visit still paid for a server render.
+  // The failure mode is a build that looks correct and a site that is not, which
+  // is why it is asserted in the build output rather than trusted (see the ○/●
+  // markers for /[locale] in `npm run build`).
+  //
+  // Must run before any other next-intl server call in this component.
+  setRequestLocale(locale);
 
   const messages = await getMessages();
 
