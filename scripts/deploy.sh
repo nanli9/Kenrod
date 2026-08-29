@@ -6,7 +6,7 @@ echo "=== Kenrod Deployment ==="
 cd "$(dirname "$0")/.."
 
 echo "Pulling latest code..."
-git pull origin main
+git pull origin master
 
 echo "Installing dependencies..."
 npm ci
