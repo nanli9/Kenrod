@@ -3,21 +3,29 @@ import { siteUrl } from '@/lib/siteUrl';
 
 // Generated into a static /robots.txt at build time.
 //
-// /hero-model/ is disallowed on purpose. It is the route that serves the 3.9 MB
-// brotli geometry (src/app/hero-model/[file]/route.ts), and there is nothing in
-// a vertex block for a crawler to index — only bandwidth to spend. Blocking it
-// costs the site nothing: the page that needs those bytes fetches them from the
-// browser, which does not consult robots.txt.
+// /models/ is disallowed because that is now where the geometry is fetched from
+// directly — the /hero-model/ route this used to name was deleted when the site
+// became a static export. Same reasoning as before: there is nothing in a vertex
+// block for a crawler to index, only bandwidth to spend, and the browser that
+// needs those bytes does not consult robots.txt.
 //
-// public/models/ is left alone. Those URLs are unlinked from any page, so
-// nothing crawls to them, and naming them here would be the one thing that
-// advertises 7.3 MB of uncompressed binaries to anyone reading this file.
+// The tradeoff is deliberate. A renderer that obeys this (Googlebot does) will
+// draw the page without its hero. That is the correct trade for a decorative
+// WebGL canvas whose absence costs no content: every word on the page is in the
+// HTML already, and the alternative is inviting crawlers to pull 4 MB each.
+// Required by `output: 'export'`. This file reads process.env through siteUrl(),
+// which is enough for Next to suspect it might vary per request and refuse to
+// export it — the build fails outright rather than silently omitting the file.
+// The origin is baked in at build time, which is exactly the intent: a bucket
+// cannot compute it later.
+export const dynamic = 'force-static';
+
 export default function robots(): MetadataRoute.Robots {
   return {
     rules: {
       userAgent: '*',
       allow: '/',
-      disallow: '/hero-model/',
+      disallow: '/models/',
     },
     sitemap: `${siteUrl()}/sitemap.xml`,
   };

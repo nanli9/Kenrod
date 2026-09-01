@@ -35,11 +35,27 @@ export const MODEL_HASH: readonly [string, string] = ['4481d8b261a8', '4490a67a6
 // the diagram's layout comes out of the file rather than being guessed in the
 // scene. Both halves are required — a vertex block without the sidecar that says
 // which bytes are which shape is not a partial success, it is nothing.
-// Served by src/app/hero-model/[file]/route.ts, which reads them out of
-// public/models and adds the Content-Encoding the static file handler will not.
-// /hero-model rather than /models because public/ is served BEFORE the app
-// router, so a route on the folder's own path is silently shadowed — see the
-// route for the measurement. The raw /models/... URLs still work; nothing on the
-// site uses them.
-export const CAD_URL = `/hero-model/cad-layers.bin?v=${MODEL_REV}`;
-export const CAD_INDEX_URL = `/hero-model/cad-layers-index.bin?v=${MODEL_REV}`;
+//
+// THESE POINT AT THE .br FILES ON PURPOSE, AND NOTHING DECOMPRESSES THEM IN JS.
+//
+// They used to go through /hero-model/[file], a route that read Accept-Encoding
+// and picked an encoding to answer with. That route is gone: `output: 'export'`
+// has no server to run it, and the site is now a bucket. What replaces it is the
+// bucket itself — scripts/deploy-oss.sh uploads cad-layers.bin.br with
+// `Content-Encoding: br` in its object metadata, so the browser is told the
+// bytes are brotli and inflates them transparently on the way into fetch(). By
+// the time parseCadLayers sees the ArrayBuffer it holds the same 7,628,072 bytes
+// it always did.
+//
+// This is strictly better than what the route achieved on Vercel, which
+// re-compressed the response at its own lower quality and shipped 5,548,975
+// bytes. Straight off the bucket it is the 4,132,280-byte q11 file.
+//
+// THE FAILURE MODE IS SILENT AND TOTAL. If the metadata is missing — a manual
+// upload, a console drag-and-drop, a sync tool that does not preserve headers —
+// the browser receives raw brotli, hands 4 MB of compressed noise to
+// parseCadLayers, and the magic-number check fails. Blank hero, no console
+// error worth the name, and a file that looks fine in the bucket listing. Deploy
+// with the script; scripts/verify-oss.sh exists to prove the header survived.
+export const CAD_URL = `/models/cad-layers.bin.br?v=${MODEL_REV}`;
+export const CAD_INDEX_URL = `/models/cad-layers-index.bin.br?v=${MODEL_REV}`;
