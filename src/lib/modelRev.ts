@@ -11,9 +11,12 @@
 // binary at the same URL would never be picked up. BUMP THIS whenever any .bin
 // under public/models is regenerated; it is the only thing that invalidates a
 // returning visitor.
-// (Still '1': the binaries themselves have not been rebuilt. The URL below moved,
-// which is a fresh URL and needs no stamp change of its own.)
-export const MODEL_REV = '1';
+// ('2' as of 2026-09-05: cad-layers.bin was regenerated after the four side rails'
+// outer trim was made symmetric -- brown at both ends and white through the
+// centre, with the gold edge frame following the brown. Geometry is byte-identical
+// in shape; only the per-vertex material bytes moved. A returning visitor still
+// holds the old palette assignment, so the stamp has to move with it.)
+export const MODEL_REV = '2';
 
 // What MODEL_REV above is currently a stamp FOR: the first 12 hex digits of the
 // SHA-256 of each binary, in the order [cad-layers.bin, cad-layers-index.bin].
@@ -28,7 +31,7 @@ export const MODEL_REV = '1';
 // these and FAILS THE BUILD if they disagree. That turns a year-long silent bug
 // into a five-second edit at the moment the geometry changes. Bump MODEL_REV and
 // paste the two hashes the script prints.
-export const MODEL_HASH: readonly [string, string] = ['4481d8b261a8', '4490a67a64cf'];
+export const MODEL_HASH: readonly [string, string] = ['526d24eefb49', '4490a67a64cf'];
 
 // The machine, and the only geometry the hero downloads. Written by
 // scripts/build-cad-layers.py; the sidecar carries the CAD explode offsets, so
