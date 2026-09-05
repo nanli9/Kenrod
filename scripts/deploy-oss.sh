@@ -57,27 +57,53 @@ rm -f out/models/*.gz out/models/cad-layers.bin out/models/cad-layers-index.bin 
 
 COMMON=(--endpoint "$OSS_ENDPOINT" -f)
 
+# ossutil 1.x takes one `--meta "A:b#C:d"`; ossutil 2.x takes separate header
+# flags (--content-encoding, --cache-control). Detected rather than assumed,
+# because guessing wrong is not a loud failure: the object can upload perfectly
+# with the header simply absent, which is precisely the silent breakage this
+# script exists to prevent. verify-oss.sh at the end is the backstop.
+OSSUTIL_MAJOR="$("$OSSUTIL" --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 | cut -d. -f1)"
+OSSUTIL_MAJOR="${OSSUTIL_MAJOR:-1}"
+echo "ossutil major version: $OSSUTIL_MAJOR"
+
+# Fills the META array for the flavour in use. $1 Cache-Control,
+# $2 Content-Encoding (optional), $3 Content-Type (optional).
+META=()
+set_meta() {
+  META=()
+  if [ "$OSSUTIL_MAJOR" -ge 2 ]; then
+    META+=(--cache-control "$1")
+    if [ -n "${2:-}" ]; then META+=(--content-encoding "$2"); fi
+    if [ -n "${3:-}" ]; then META+=(--content-type "$3"); fi
+  else
+    local m="Cache-Control:$1"
+    if [ -n "${2:-}" ]; then m="$m#Content-Encoding:$2"; fi
+    if [ -n "${3:-}" ]; then m="$m#Content-Type:$3"; fi
+    META+=(--meta "$m")
+  fi
+}
+
 echo "=== 1/3  Fingerprinted assets (immutable) ==="
 # Every filename under _next/static contains a content hash, so a changed file is
 # a changed URL and this can never serve a stale one.
-"$OSSUTIL" cp -r out/_next/static/ "$DEST/_next/static/" "${COMMON[@]}" \
-  --meta "Cache-Control:public, max-age=31536000, immutable"
+set_meta "public, max-age=31536000, immutable"
+"$OSSUTIL" cp -r out/_next/static/ "$DEST/_next/static/" "${COMMON[@]}" "${META[@]}"
 
 echo "=== 2/3  Geometry (immutable + Content-Encoding) ==="
 # The header the whole hero depends on. Set at upload rather than patched after,
 # so there is no window where the object exists without it.
 for f in out/models/*.br; do
   name="$(basename "$f")"
-  "$OSSUTIL" cp "$f" "$DEST/models/$name" "${COMMON[@]}" \
-    --meta "Content-Encoding:br#Cache-Control:public, max-age=31536000, immutable#Content-Type:application/octet-stream"
+  set_meta "public, max-age=31536000, immutable" "br" "application/octet-stream"
+  "$OSSUTIL" cp "$f" "$DEST/models/$name" "${COMMON[@]}" "${META[@]}"
 done
 
 echo "=== 3/3  Everything else (revalidate) ==="
 # HTML, robots.txt, sitemap.xml, the product JPEGs. These share URLs across
 # deploys, so they must revalidate or a visitor keeps yesterday's page forever.
-"$OSSUTIL" cp -r out/ "$DEST/" "${COMMON[@]}" \
-  --exclude "_next/static/*" --exclude "models/*" \
-  --meta "Cache-Control:public, max-age=0, must-revalidate"
+set_meta "public, max-age=0, must-revalidate"
+"$OSSUTIL" cp -r out/ "$DEST/" "${COMMON[@]}" "${META[@]}" \
+  --exclude "_next/static/*" --exclude "models/*"
 
 echo
 echo "=== Deployed. Verifying the headers actually took ==="
