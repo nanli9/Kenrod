@@ -11,9 +11,14 @@
 // binary at the same URL would never be picked up. BUMP THIS whenever any .bin
 // under public/models is regenerated; it is the only thing that invalidates a
 // returning visitor.
-// (Still '1': the binaries themselves have not been rebuilt. The URL below moved,
-// which is a fresh URL and needs no stamp change of its own.)
-export const MODEL_REV = '1';
+// ('3' as of 2026-09-05: cad-layers.bin was regenerated after the four side rails'
+// outer trim was made symmetric. Each rail carries six panels; the brown pair sat
+// at one end only, so the strip read brown near some corners and white elsewhere.
+// It is now brown at both ends and white through the centre, with the gold edge
+// frame following the brown rather than only two of the four brown panels. The
+// shared PBR_generic_ffffff was NOT recoloured -- 38 objects use it -- so this is
+// a per-face reassignment on those four rails and nothing else moved.)
+export const MODEL_REV = '3';
 
 // What MODEL_REV above is currently a stamp FOR: the first 12 hex digits of the
 // SHA-256 of each binary, in the order [cad-layers.bin, cad-layers-index.bin].
@@ -28,7 +33,7 @@ export const MODEL_REV = '1';
 // these and FAILS THE BUILD if they disagree. That turns a year-long silent bug
 // into a five-second edit at the moment the geometry changes. Bump MODEL_REV and
 // paste the two hashes the script prints.
-export const MODEL_HASH: readonly [string, string] = ['4481d8b261a8', '4490a67a64cf'];
+export const MODEL_HASH: readonly [string, string] = ['526d24eefb49', '4490a67a64cf'];
 
 // The machine, and the only geometry the hero downloads. Written by
 // scripts/build-cad-layers.py; the sidecar carries the CAD explode offsets, so
@@ -49,7 +54,7 @@ export const MODEL_HASH: readonly [string, string] = ['4481d8b261a8', '4490a67a6
 //
 // This is strictly better than what the route achieved on Vercel, which
 // re-compressed the response at its own lower quality and shipped 5,548,975
-// bytes. Straight off the bucket it is the 4,132,280-byte q11 file.
+// bytes. Straight off the bucket it is the 4,132,733-byte q11 file.
 //
 // THE FAILURE MODE IS SILENT AND TOTAL. If the metadata is missing — a manual
 // upload, a console drag-and-drop, a sync tool that does not preserve headers —
