@@ -145,12 +145,52 @@ const DPR_CAP_MOBILE = 1.75;
 // teardown was being drawn at plaster roughness. Same number, two defects.
 const PIXEL_BUDGET_SOLID = 5_200_000;
 
+// The solid pass may draw ABOVE the device's own pixel ratio and let the browser
+// downsample it. That is supersampling, and on an ordinary desktop monitor it is
+// the only edge lever left.
+//
+// `cap` used to be min(devicePixelRatio, 2) for every pass, which reads as "never
+// draw pixels the display cannot show". That is right for the gaussian pass and
+// wrong for this one, and it quietly made PIXEL_BUDGET_SOLID dead code on the
+// commonest display there is. Every number in that block was fitted on hidpi
+// laptops -- 1440x900 dpr 2, 1728x1080 dpr 2 -- where `fit` lands UNDER the cap
+// and the budget is what binds. On a dpr-1 panel `fit` lands over it, so the cap
+// bound instead and the budget never did anything: measured on a 2560x1330 dpr-1
+// viewport, the drawing buffer came back 2560x1330, exactly 1.0x, against a
+// budget of 5.2 Mpx. That is 1.53x of headroom the code was forbidden to spend,
+// on the display class least able to hide a stair-step -- a 27" 1440p panel is
+// ~109 ppi against ~220 for the laptops every one of these numbers was fitted on.
+//
+// Still bounded by the budget, exactly as before, so this cannot run away: it
+// raises a CEILING and changes nothing where that ceiling was not the binding
+// constraint. 1728x1080 dpr 2 still resolves to 1.67 and 1440x900 dpr 2 still
+// resolves to 2.0 -- both unchanged. It moves only where devicePixelRatio was
+// doing the binding: 2560x1330 dpr 1 goes 1.0 -> 1.24, 1920x1080 dpr 1 goes
+// 1.0 -> 1.59. A 4K dpr-1 panel has `fit` at 0.79, so it stays at 1.0 and gains
+// nothing it could not afford anyway.
+//
+// NOT applied to the gaussian pass. That one is fill-bound alpha blending several
+// layers deep, and soft gaussians have no edges to alias -- supersampling them is
+// all of the cost and none of the benefit, which is the same fact `antialias:
+// false` on the context already turns on. Not on mobile either; it sits at its cap.
+//
+// And deliberately NOT paired with more MSAA samples. Sample count and render
+// scale are two levers on one defect, and the note at PIXEL_BUDGET_SOLID is
+// explicit that running both at full tilt is paying twice for one thing.
+// MSAA_BY_LEVEL stays at 4, and the governor still spends it before this.
+const SSAA_CAP_DESKTOP = 2;
+
 function baseDpr(solid = false) {
   if (typeof window === 'undefined') return 1;
   const w = window.innerWidth;
   const h = window.innerHeight;
   const small = w < 820;
-  const cap = Math.min(window.devicePixelRatio || 1, small ? DPR_CAP_MOBILE : DPR_CAP_DESKTOP);
+  const dev = window.devicePixelRatio || 1;
+  const cap = small
+    ? Math.min(dev, DPR_CAP_MOBILE)
+    : solid
+      ? SSAA_CAP_DESKTOP
+      : Math.min(dev, DPR_CAP_DESKTOP);
   const budget = small
     ? PIXEL_BUDGET_MOBILE
     : solid
@@ -5401,6 +5441,48 @@ void main() {
 // picking a different fixed order, and it already does.
 const MSAA_BY_LEVEL = [4, 2, 2, 2, 0];
 
+// What has to be roughly constant is SAMPLES PER CSS PIXEL, not the MSAA count,
+// and the array above is a governor ladder rather than a statement about the
+// display. Left alone it hands every device 4x regardless of how much the render
+// scale already bought, which is the "paying twice for one thing" the note at
+// PIXEL_BUDGET_SOLID warns about -- and it warns about it while the code does it.
+//
+// A CSS pixel is an angular unit, near enough constant across devices by design,
+// so scale^2 * samples is a fair perceptual currency. Priced that way the spread
+// was never defensible:
+//
+//   2560x1330 dpr 1   scale 1.24   4x   ->  6.1     the 27" 1440p desktop
+//   1728x1080 dpr 2   scale 1.67   4x   -> 11.1
+//   1440x900  dpr 2   scale 2.00   4x   -> 16.0
+//   390x844   dpr 3   scale 1.75   4x   -> 12.2     a phone
+//
+// The panel that can least afford a stair-step was getting the FEWEST samples,
+// and a phone -- densest display, smallest screen, weakest GPU, and the one place
+// a dropped frame is most likely -- was getting twice the desktop's.
+//
+// So: top up to a target instead of always spending the maximum. The multisample
+// cost is per pixel and the render scale already multiplies it, so this is where
+// the saving is largest on exactly the devices that need it most.
+const AA_TARGET_SAMPLES = 7;
+
+// Small screens never take 4x. The density argument already lands them on 2, and
+// this makes it a floor rather than an accident of the arithmetic: a phone is the
+// densest display and the weakest GPU on the list, and the offscreen target that
+// multisampling requires is itself the single most expensive item on the ladder
+// (measured: 3.46 ms on an M4, against about 1 ms for every sample step combined).
+const MSAA_SMALL_CAP = 2;
+
+// Never below 2 here. Zero is not "fewer samples" -- it takes the branch in
+// DiagramMsaa that drops the offscreen target altogether, and that is the
+// governor's trapdoor to spend on evidence, not a resolution to guess at.
+function msaaCeiling() {
+  if (typeof window === 'undefined') return MSAA_BY_LEVEL[0];
+  const scale = baseDpr(true);
+  const want = AA_TARGET_SAMPLES / Math.max(1e-6, scale * scale);
+  const ceil = want >= 3 ? 4 : 2;
+  return window.innerWidth < 820 ? Math.min(ceil, MSAA_SMALL_CAP) : ceil;
+}
+
 // The hold beat is a still picture that costs a million triangles and a
 // multisample resolve to produce, sixty times a second, for as long as somebody
 // leaves it on screen. Nothing on that beat animates by design — that is the
@@ -5781,10 +5863,16 @@ export default function ScrollScene({
   // See ins.solid.
   const [solid, setSolid] = useState(false);
   const [dprBase, setDprBase] = useState(() => baseDpr());
+  const [msaaCap, setMsaaCap] = useState(() => msaaCeiling());
   const handleQuality = useCallback((level: number) => setQuality(level), []);
   const handleSolid = useCallback((v: boolean) => setSolid(v), []);
   useEffect(() => {
-    const fit = () => setDprBase(baseDpr(solid));
+    const fit = () => {
+      setDprBase(baseDpr(solid));
+      // Keyed to the SOLID scale whichever pass is live, so the ceiling does not
+      // flap as `solid` toggles -- it is a property of the display, not the beat.
+      setMsaaCap(msaaCeiling());
+    };
     fit();
     window.addEventListener('resize', fit, { passive: true });
     return () => window.removeEventListener('resize', fit);
@@ -6400,7 +6488,7 @@ export default function ScrollScene({
           onSelect={handleSelect}
           onInspectable={handleInspectable}
           onSolid={handleSolid}
-          msaa={solid ? MSAA_BY_LEVEL[quality] : 0}
+          msaa={solid ? Math.min(MSAA_BY_LEVEL[quality], msaaCap) : 0}
         />
       </Canvas>
     ),
